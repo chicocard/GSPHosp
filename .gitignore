@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+dist-installer/
+.venv/
+venv/
+env/
+*.spec
+!build/papahr.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Dados e logs
+*.parquet
+*.csv
+*.dbc
+*.dbf
+*.zip
+*.rds
+data-raw/
+output/
+
+# ---------------------------
+# DADOS SENSÍVEIS SUS (NÃO COMMITAR!)
+# Perfil do usuário %USERPROFILE%\.gsphosp\ (ou antigo %USERPROFILE%\.papahr\)
+# ---------------------------
+*.duckdb
+*.duckdb.*
+papahr_users.db
+papahr_users.db-wal
+papahr_users.db-shm
+papahr_audit.db
+papahr_audit.db-wal
+papahr_audit.db-shm
+gsphosp_users.db
+gsphosp_users.db-wal
+gsphosp_users.db-shm
+gsphosp_audit.db
+gsphosp_audit.db-wal
+gsphosp_audit.db-shm
+papahr_sessions/
+gsphosp_sessions/
+sessions/
+papahr/data/*.parquet.bak
+
+# Envs e segredos
+.env
+.env.*
+!env.example
+
+logs/
+.papahr/
+.gsphosp/
+.env
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Testes
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/

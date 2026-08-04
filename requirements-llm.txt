@@ -1,0 +1,16 @@
+# =====================================================
+# LLM LOCAL (llama-cpp-python)
+# Requer:
+#   1. requirements-core.txt instalado
+#   2. Long Paths habilitado no Windows (HKLM/System)
+#   3. (Recomendado) MSVC Build Tools (C++ 17) se for compilar
+#
+# Melhor instalar via WHEEL pré-compilado:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# =====================================================
+# NÃO coloque llama-cpp-python aqui diretamente — o sdist
+# tem paths longos e falha em instalações padrão do
+# Windows. Use o comando acima.
+#
+# Caso queira usar CUDA/Vulkan, consulte
+# https://abetlen.github.io/llama-cpp-python/install.html

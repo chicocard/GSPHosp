@@ -1,0 +1,134 @@
+--- PAGINA 1 ---
+Gestão de Saúde Populacional e Dinâmica
+Territorial
+Documento consolidado de métricas e modelagem espacial para inteligência em redes hospitalares,
+com  foco  na  eficiência  clínico-operacional  e  atração  de  pacientes  (Modelos  BPCI/DRG  e
+Gravitacionais).
+1. Estratificação de Risco e Demanda
+A base da Gestão de Saúde Populacional (GSP) é entender a complexidade da população atendida e
+prever o risco clínico logo na porta do hospital. O objetivo é sair da visão reativa para a gestão proativa
+de coortes.
+Índice LACE: Calcula o risco de readmissão ou mortalidade combinando Tempo de permanência
+(Length of stay), Acuidade (admissão emergencial), Comorbidades (geralmente via Índice de
+Charlson) e visitas à Emergência nos últimos 6 meses.
+Case Mix Index (CMI): Reflete a complexidade e a gravidade média dos pacientes internados em
+um determinado período, fundamental para ajustar as expectativas de custo e mortalidade.
+Estrato de
+Risco Perfil Clínico Típico % do Custo
+Total
+Frequência de Pronto-
+Socorro
+Alto Multimorbidade complexa,
+dependência 45-50% > 3 visitas/ano
+Médio Crônicos descompensados (ex:
+DPOC, ICC) 30-35% 1-2 visitas/ano
+Baixo Saudáveis ou crônicos controlados15-20% < 1 visita/ano
+2. Eficiência Clínica e Valor (Value-Based Healthcare)
+Para viabilizar modelos de remuneração avançados como  Pagamento por Episódio (BPCI) e  DRG
+(Diagnosis Related Groups), o hospital precisa cruzar o desfecho clínico com o custo da jornada
+completa do paciente.
+Tempo de Permanência Observado vs. Esperado (O/E LOS): A razão entre o tempo real de
+internação e o tempo projetado pela base do DRG. Valores > 1 indicam ineficiência ou
+complicações.
+• 
+• 
+• 
+--- PAGINA 2 ---
+Custo Médio por Episódio: O custo total empacotado da internação somado aos custos da janela
+pós-alta (ex: 30 a 90 dias).
+3. Integração Territorial e Pressão Externa
+O hospital não é um sistema isolado. A inteligência epidemiológica do território ao redor dita diretamente
+a pressão na porta e a gravidade dos casos.
+Taxa de Internações por Condições Sensíveis à Atenção Primária (ICSAP): Mede as
+internações (como crises asmáticas ou hipertensivas) que poderiam ter sido evitadas com uma boa
+gestão ambulatorial na rede. Alta incidência de ICSAP no hospital indica falha na rede de atenção
+básica.
+Coeficiente de Atração e Distance Decay: Quantifica a força gravitacional do hospital sobre outros
+municípios e como a distância afeta a gravidade do paciente.
+4. Transição de Cuidado e Desfechos Pós-Alta
+O episódio hospitalar não termina com a saída do paciente. O monitoramento contínuo é o principal
+mecanismo para conter readmissões e garantir a margem em contratos de risco compartilhado.
+Taxa de Readmissão em 30 dias (por DRG específica).
+Taxa de Contato Efetivo Pós-Alta: Percentual de pacientes contatados ou avaliados nas primeiras
+48h a 7 dias após a desospitalização.
+Linha de Cuidado / DRG Vol. Altas % Contato em 48h % Readmissão (30d)
+Insuficiência Cardíaca 142 88% 18%
+Doença Pulmonar Obstrutiva95 92% 15%
+Artroplastia de Quadril 64 100% 4%
+Modelagem Gravitacional Espacial no SUS
+Para modelar o fluxo de pacientes — especialmente ao analisar o deslocamento para serviços cirúrgicos
+ou de alta complexidade em redes extensas —, a abordagem padrão ouro é a aplicação de Modelos
+Gravitacionais Espaciais. Essa modelagem cruza a "massa" (capacidade de resolução do hospital) com
+a "fricção espacial" (a relutância do paciente em viajar, matematicamente expressa como  distance
+decay).
+• 
+• 
+• 
+• 
+• 
+--- PAGINA 3 ---
+1. A Matemática por trás da Atração
+O modelo baseia-se na formulação de Huff. A probabilidade Pij de um grupo de pacientes do município i
+buscar o hospital j é calculada por:
+Pij = (Mj / dijβ) / Σ (Mj / dijβ) 
+Mj: Massa de atração do hospital. Pode ser o número de leitos cirúrgicos cadastrados no CNES, o
+volume histórico de AIHs aprovadas, ou um índice composto.
+dij: Distância. Quilometragem linear (haversine) ou tempo de viagem.
+β: Coeficiente de distance decay.
+O comportamento do β: Procedimentos ambulatoriais ou de baixa complexidade têm um β alto (o
+paciente não viaja; a atração despenca nos primeiros quilômetros). Tratamentos oncológicos ou cirurgias
+de grande porte têm um β baixo (a curva de decaimento achata, pois a especialização justifica o longo
+deslocamento). 
+2. Estruturação dos Dados (SIH/SUS)
+Passos para construir a matriz Origem-Destino (O-D):
+Variáveis de Fluxo: Utilizar MUNIC_RES (Origem) e MUNIC_MOV (Destino) das bases da SIH.
+Geocodificação: Obter lat/lon dos centroides de cada município de residência e cruzar com as
+coordenadas do CNES.
+Tratamento de Distância Zero: Atribuir uma distância interna mínima (ex: 1 a 2 km) para pacientes
+internados no próprio município residente para evitar divisão por zero.
+3. Implementação em R
+O ecossistema do R combina a legibilidade do dplyr com pacotes espaciais como o geosphere.
+• 
+• 
+• 
+1. 
+2. 
+3. 
+--- PAGINA 4 ---
+library(dplyr)
+library(geosphere) # Para cálculo da distância de Haversine
+# Considerando df_aih com: mun_res, mun_int, lat_res, lon_res, 
+# lat_hospital, lon_hospital, leitos_cirurgicos
+df_fluxo <- df_aih %>%
+  # 1. Calcula a distância em km entre residência e hospital
+  mutate(
+    distancia_km = distHaversine(cbind(lon_res, lat_res), 
+                   cbind(lon_hospital, lat_hospital)) / 1000,
+    # Evita divisão por zero para munícipes locais
+    distancia_km = ifelse(distancia_km < 1, 1, distancia_km)
+  ) %>%
+  # 2. Define o beta empírico e calcula a atração bruta
+  mutate(
+    beta = 1.5, # Ajustável conforme a complexidade do serviço
+    fator_atracao = leitos_cirurgicos / (distancia_km ^ beta)
+  ) %>%
+  # 3. Agrupa pelo município de origem para calcular a probabilidade
+  group_by(mun_res) %>%
+  mutate(
+    probabilidade_escolha = fator_atracao / sum(fator_atracao, na.rm = TRUE)
+  ) %>%
+  ungroup()
+4. Implementação em Python
+Utilizando o Pandas, a lógica de agregação com .transform() faz o trabalho de forma vetorizada.
+import pandas as pd
+import numpy as np
+# df contém colunas: 'MUNIC_RES', 'ID_HOSPITAL', 'distancia_km', 'massa_hospital'
+beta = 1.5
+# Tratamento para distâncias intra-municipais nulas ou muito curtas
+df['distancia_km'] = np.where(df['distancia_km'] < 1, 1, df['distancia_km'])
+# 1. Calcular a Força de Atração bruta (M / d^beta)
+df['forca_atracao'] = df['massa_hospital'] / (df['distancia_km'] ** beta)
+# 2. Somatório das forças de atração para CADA município de residência
+soma_atracao_residencia = df.groupby('MUNIC_RES')['forca_atracao'].transform('sum')
+# 3. Probabilidade de o paciente do município ir para aquele hospital
+df['probabilidade_escolha'] = df['forca_atracao'] / soma_atracao_residencia

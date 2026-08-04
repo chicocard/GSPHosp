@@ -1,0 +1,18 @@
+# =====================================================
+# Requisitos MÍNIMOS: processamento de dados + CLI
+# Instale estes PRIMEIRO.
+# =====================================================
+polars>=0.20.0
+pyarrow>=14.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+httpx>=0.25.0
+aioftp>=0.22.0
+dbfread>=2.0.7
+structlog>=24.1.0
+rich>=13.7.0
+tqdm>=4.66.0
+tenacity>=8.2.0
+python-dateutil>=2.8.0
+keyring>=25.0.0
+cryptography>=42.0.0
