@@ -1035,10 +1035,10 @@ class PipelinePage(QWidget):
     def _selected_ufs(self) -> list[str]:
         """Retorna UFs marcadas no Passo 2. NUNCA expande para todas as 27 UFs.
 
-        Motivo (BUG R2 corrigido): o fallback `or list(get_ufs())` anterior
-        causava download de TODAS as UFs do Brasil (27) no pipeline FTP SIA/SIH
-        caso nenhum chip estivesse marcado → erro "Nenhum arquivo encontrado"
-        pois o DATASUS recusa/limita volume.
+        Motivo (BUG R2 corrigido): o fallback que adicionava a lista de todas
+        as UFs quando nenhum chip estava marcado causava download de TODAS
+        as UFs do Brasil (27) no pipeline FTP SIA/SIH — DATASUS recusava por
+        volume e aparecia erro de "Nenhum arquivo encontrado".
         """
         return self._selected_ufs_nonempty()
 
@@ -1912,7 +1912,7 @@ class PipelinePage(QWidget):
             item.setToolTip(f"CNES: {cnes}\nNome: {nome}\nUF: {uf or '—'}\nTipo: {tipo or '—'}")
             self.list_hosp.addItem(item)
             n += 1
-            if n > 5000:
+            if n >= 5000:
                 break
         # Feedback: quantos aparecem vs quantos existem
         if hasattr(self, "search_hosp") and text:

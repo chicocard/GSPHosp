@@ -557,8 +557,19 @@ def _resolver_macro_drs_por_municipio(
         if m:
             digito = int(m.group(1))
         if digito is not None:
-            idx = (digito - 1) % len(drs_todas)
-            selecionada_drs_nome = drs_todas[idx]
+            # 1º: match EXATO pelo código da DRS ("0006" → "DRS 06 - ...").
+            # Só cai no índice posicional se nenhuma DRS tiver o código.
+            alvo = str(digito).zfill(2)
+            achou: str | None = None
+            for d in drs_todas:
+                if _extrair_codigo(d, "DRS") == alvo:
+                    achou = d
+                    break
+            if achou is not None:
+                selecionada_drs_nome = achou
+            else:
+                idx = (digito - 1) % len(drs_todas)
+                selecionada_drs_nome = drs_todas[idx]
             for mn, drs_list in get_macrorregioes(uf).items():
                 if selecionada_drs_nome in drs_list:
                     selecionada_macro_nome = mn

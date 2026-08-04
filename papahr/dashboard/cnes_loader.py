@@ -187,23 +187,27 @@ def _detect_csv_params(path: Path) -> dict[str, object]:
                     try_parse_dates=False,
                 )
                 ncols = len(df.columns)
-                if ncols > best_cols and "CO_CNES" in df.columns or ncols >= 10:
-                    # Vitoria se houver CO_CNES conhecido ou >=10 colunas.
-                    if "CO_CNES" in df.columns or ncols > best_cols:
-                        best_cols = ncols
-                        best = dict(
-                            separator=sep,
-                            encoding=enc,
-                            quote_char='"',
-                            infer_schema=False,
-                            low_memory=True,
-                            ignore_errors=True,
-                            truncate_ragged_lines=True,
-                            try_parse_dates=False,
-                            infer_schema_length=5000,
-                        )
-                        if "CO_CNES" in df.columns and ncols >= 20:
-                            return best
+                tem_co_cnes = "CO_CNES" in df.columns
+                params = dict(
+                    separator=sep,
+                    encoding=enc,
+                    quote_char='"',
+                    infer_schema=False,
+                    low_memory=True,
+                    ignore_errors=True,
+                    truncate_ragged_lines=True,
+                    try_parse_dates=False,
+                    infer_schema_length=5000,
+                )
+                # Vitoria instantanea: CO_CNES presente e >= 20 colunas.
+                if tem_co_cnes and ncols >= 20:
+                    return params
+                # Caso contrario guarda SEMPRE a combinacao com MAIS colunas
+                # (empate: prefere a que parseou CO_CNES). NUNCA sobrescreve
+                # a melhor com uma de menos colunas.
+                if ncols > best_cols or (tem_co_cnes and ncols == best_cols):
+                    best_cols = ncols
+                    best = params
             except Exception:
                 continue
     if best is None:
@@ -338,25 +342,36 @@ class CNESData:
         # ou colunas diversas. Sem ela, uf_hospital=""" fica vazia e a cascata cai.
         from papahr.geo.reference import UF_CODIBGE_TO_SIGLA
         expr_cod_to_sigla = UF_CODIBGE_TO_SIGLA
+        def _vazio_vira_null(e: pl.Expr) -> pl.Expr:
+            # CRITICAL: pl.coalesce considera "" como VALOR VALIDO (nao-nulo).
+            # Sem esta conversao, uma coluna existente porem vazia "ganha" da
+            # cascata e os fallbacks (ex: UF via municipio) nunca rodam.
+            return pl.when(e.is_not_null() & (e != "")).then(e).otherwise(None)
+
         uf_exprs: list[pl.Expr] = []
         if "SIGLA_ESTADO_GESTOR" in df.columns:
-            uf_exprs.append(pl.col("SIGLA_ESTADO_GESTOR").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+            uf_exprs.append(_vazio_vira_null(
+                pl.col("SIGLA_ESTADO_GESTOR").cast(pl.Utf8).str.strip_chars().str.to_uppercase()))
         if "SIGLA_UF_GESTOR" in df.columns:
-            uf_exprs.append(pl.col("SIGLA_UF_GESTOR").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+            uf_exprs.append(_vazio_vira_null(
+                pl.col("SIGLA_UF_GESTOR").cast(pl.Utf8).str.strip_chars().str.to_uppercase()))
         if "SG_UF" in df.columns:
-            uf_exprs.append(pl.col("SG_UF").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+            uf_exprs.append(_vazio_vira_null(
+                pl.col("SG_UF").cast(pl.Utf8).str.strip_chars().str.to_uppercase()))
         if "UF" in df.columns:
-            uf_exprs.append(pl.col("UF").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+            uf_exprs.append(_vazio_vira_null(
+                pl.col("UF").cast(pl.Utf8).str.strip_chars().str.to_uppercase()))
         for col_cod in ("CO_ESTADO_GESTOR", "CO_UF_GESTOR", "CO_UF_IBGE"):
             if col_cod in df.columns:
                 cod_raw = pl.col(col_cod).cast(pl.Utf8).str.strip_chars().str.zfill(2)
-                mapped = cod_raw.replace(expr_cod_to_sigla, default="").alias("__uf_cod")
-                uf_exprs.append(mapped)
+                # default=None → codigo nao mapeado vira null e deixa a cascata seguir
+                mapped = cod_raw.replace(expr_cod_to_sigla, default=None)
+                uf_exprs.append(_vazio_vira_null(mapped))
         if "CO_MUNICIPIO_GESTOR" in df.columns:
             cod_raw = pl.col("CO_MUNICIPIO_GESTOR").cast(pl.Utf8).str.strip_chars()
             dois_primeiros = cod_raw.str.slice(0, 2).str.zfill(2)
-            mapped_do_mun = dois_primeiros.replace(expr_cod_to_sigla, default="").alias("__uf_mun")
-            uf_exprs.append(mapped_do_mun)
+            mapped_do_mun = dois_primeiros.replace(expr_cod_to_sigla, default=None)
+            uf_exprs.append(_vazio_vira_null(mapped_do_mun))
         if uf_exprs:
             if "SIGLA_UF" in df.columns:
                 df = df.with_columns(

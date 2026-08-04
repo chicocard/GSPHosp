@@ -1,0 +1,23 @@
+======================================================================
+GSPHosp — Testes FASE 1 (sem GUI)
+======================================================================
+[PASS] Teste 0-sintaxe: 4 arquivos criticos compilam sem erro
+[PASS] Teste 5-enrichment: uf=MG mun=0314330 macro=MR02/MR02 - Triângulo / Alto Paranaíba drs=06/DRS 06 - Patos de Minas
+[PASS] Teste 6-bate-MG: retorno=True (esperado True)
+[PASS] Teste 7-bate-SP: retorno=False (esperado False)
+[PASS] Teste 8-macros-RJ: retorno=False (esperado False; 3 macros RJ testadas)
+[PASS] Teste 9-uf-vazia: retorno=True (esperado True)
+[PASS] Teste 11-cascata: retorno=True macros=['MR02 - Triângulo / Alto Paranaíba'] drs=['DRS 06 - Patos de Minas'] (esperado True)
+[FAIL] Teste 10-selected-ufs: FALLBACK 27 UFs AINDA PRESENTE!
+[PASS] Teste 1-sigla-uf: SIGLA_UF presente=True n_unique=27
+[PASS] Teste 2-linhas: linhas=598,661 (esperado >= 500.000)
+[PASS] Teste 3-mg: MG=73,985 (esperado 70.000-80.000)
+[PASS] Teste 4-dilson: nome=HOSPITAL DILSON GODINHO uf_ibge=31 mun=314330 reg=0006 sigla=MG
+[PASS] Teste 12-heur2-mg: MG filtrado=73,985 dilson_presente=True
+[PASS] Teste 13-heur2-drs06: filtrado=9,070 dilson_presente=True
+[PASS] Teste 14-search: exato=1 dilson=27 codigo=1
+[PASS] Teste 15-fallback: added=1 invalid=[]
+
+======================================================================
+RESUMO: 15 PASS | 1 FAIL | 0 SKIP (total 16)
+======================================================================
