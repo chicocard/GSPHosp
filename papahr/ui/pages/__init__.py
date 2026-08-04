@@ -1033,7 +1033,14 @@ class PipelinePage(QWidget):
         return [uf for uf, ch in self.chips_uf.items() if ch.isChecked()]
 
     def _selected_ufs(self) -> list[str]:
-        return self._selected_ufs_nonempty() or list(get_ufs())
+        """Retorna UFs marcadas no Passo 2. NUNCA expande para todas as 27 UFs.
+
+        Motivo (BUG R2 corrigido): o fallback `or list(get_ufs())` anterior
+        causava download de TODAS as UFs do Brasil (27) no pipeline FTP SIA/SIH
+        caso nenhum chip estivesse marcado → erro "Nenhum arquivo encontrado"
+        pois o DATASUS recusa/limita volume.
+        """
+        return self._selected_ufs_nonempty()
 
     def _selected_macros_nonempty(self) -> list[str]:
         return [m for m, ch in self.chips_macro.items() if ch.isChecked()]
@@ -1930,12 +1937,14 @@ class PipelinePage(QWidget):
         Validações (ordem):
           1) Parse códigos (regex \\d+ para extrair só numeros)
           2) Existe na base _hospitals_data (que JÁ foi filtrada por UF/Macro/DRS)?
-             - Se NÃO existir na base → invalido (hospital não bate area geografica OU nao existe)
-          3) Já está como chip? → skip (sem duplicata)
-          4) Adiciona chip verde com NOME DO HOSPITAL (igual _add_selected_hospitals)
+          3) (FALLBACK NOVO BUG R1) — se NÃO existir em _hospitals_data, busca DIRETAMENTE
+             na base CNES local tbEstabelecimento e valida contra hospital_bate_geo com a
+             seleção ATUAL de UF/Macro/DRS do usuário. Isso permite que o usuário cole
+             CNES antes de clicar em "Aplicar filtros geográficos" (o erro da imagem 1).
+          4) Já está como chip? → skip (sem duplicata)
+          5) Adiciona chip verde com NOME DO HOSPITAL.
 
         Retorna: (added:int, invalid_codes:list[str], skipped:int, added_with_names:list[str])
-          added_with_names = lista formatada para feedback humano.
         """
         import re
 
@@ -1953,6 +1962,11 @@ class PipelinePage(QWidget):
         invalid: list[str] = []
         added_labels: list[str] = []
 
+        # Parametros de selecao GEOGRAFICA ATUAL do usuario (para fallback)
+        sel_ufs_cur = list(self._selected_ufs_nonempty() or [])
+        sel_macros_cur = list(self._selected_macros_nonempty() or [])
+        sel_drs_cur = list(d for d, ch in self.chips_drs.items() if ch.isChecked())
+
         for raw in raw_codes:
             c = str(raw).strip()
             if not c:
@@ -1961,6 +1975,80 @@ class PipelinePage(QWidget):
                 skipped += 1
                 continue
             info = lookup.get(c)
+
+            # ===================================================== FALLBACK BUG R1:
+            # Nao encontrou na lista carregada → busca direto na base CNES
+            if info is None:
+                try:
+                    from papahr.dashboard.cnes_loader import get_cnes_data
+                    from papahr.geo.reference import (
+                        hospital_bate_geo, UF_CODIBGE_TO_SIGLA,
+                    )
+                    cnes_db = get_cnes_data()
+                    cnes_db.load()
+                    edf = cnes_db.estabelecimentos
+                    match = (edf
+                             .filter(pl.col("CO_CNES").cast(pl.Utf8).str.strip_chars() == c)
+                             .head(1))
+                    if not match.is_empty():
+                        row = match.row(0, named=True)
+                        # Extrai NOME
+                        nome_h = ""
+                        for col in ("NO_FANTASIA", "NO_RAZAO_SOCIAL", "NO_FANTAS",
+                                    "NO_RAZAO", "NOME_FANTASIA", "RAZAO_SOCIAL"):
+                            val = row.get(col)
+                            if val is not None and str(val).strip():
+                                nome_h = str(val).strip()
+                                break
+                        if not nome_h:
+                            nome_h = f"CNES {c}"
+                        # Extrai UF com o mesmo fallback cascata do CNESLoader
+                        uf_h = ""
+                        for col in ("SIGLA_UF", "SIGLA_ESTADO_GESTOR", "SIGLA_UF_GESTOR",
+                                    "UF", "SG_UF", "SG_UF_GESTOR", "SG_ESTADO",
+                                    "CO_ESTADO_GESTOR", "CO_UF_GESTOR", "CO_UF"):
+                            val = row.get(col)
+                            if val is None:
+                                continue
+                            s = str(val).strip()
+                            if col.startswith("CO_"):
+                                s = (UF_CODIBGE_TO_SIGLA.get(s.zfill(2), s)
+                                     if s else "")
+                            s = s.upper()
+                            if s:
+                                uf_h = s
+                                break
+                        # Extrai municipio / regiao saude
+                        mun_h = str(row.get("CO_MUNICIPIO_GESTOR", "") or "").strip() or None
+                        rs_h = str(row.get("CO_REGIAO_SAUDE", "") or "").strip() or None
+                        # Extrai tipo
+                        tipo_h = str(row.get("CO_TIPO_ESTABELECIMENTO", "") or "").strip()
+                        bate = hospital_bate_geo(
+                            uf_hospital=uf_h,
+                            co_municipio_hospital=mun_h,
+                            co_regiao_saude_hospital=rs_h,
+                            sel_ufs=sel_ufs_cur,
+                            sel_macros=sel_macros_cur,
+                            sel_drs=sel_drs_cur,
+                        )
+                        if bate:
+                            info = (nome_h, uf_h, tipo_h)
+                            # Adiciona no lookup (para duplicatas) e tb na lista _hospitals_data
+                            lookup[c] = info
+                            hd = getattr(self, "_hospitals_data", None)
+                            if hd is None:
+                                hd = []
+                                setattr(self, "_hospitals_data", hd)
+                            hd.append((c, nome_h, uf_h, tipo_h))
+                        else:
+                            invalid.append(f"{c} (fora da area selecionada: "
+                                           f"UF={uf_h or '?'} mun={mun_h or '?'} "
+                                           f"reg={rs_h or '?'})")
+                            continue
+                except Exception as _exc_cnes:  # noqa: BLE001
+                    invalid.append(f"{c} (erro ao validar: {_exc_cnes})")
+                    continue
+
             if info is None:
                 invalid.append(c)
                 continue
@@ -2114,6 +2202,27 @@ class PipelinePage(QWidget):
             drs = self._selected_drs()
             counties = self._selected_munis()
             estabs = self._selected_hospitals()
+            # ========================================================= BLOQUEIO (BUG R2):
+            # Nunca permite rodar pipeline SEM UFs selecionadas (antes rodava 27 UFs).
+            # Nunca permite datas sem período.
+            if not ufs:
+                QMessageBox.warning(
+                    self,
+                    "Selecione pelo menos 1 UF",
+                    "Nenhuma Unidade Federativa (UF) foi selecionada no Passo 2.\n\n"
+                    "👉 Volte ao Passo 2 e marque ao menos 1 chip de UF (ex: MG).\n"
+                    "   Não é permitido baixar dados de TODAS as 27 UFs de uma vez "
+                    "(o DATASUS recusa por volume).",
+                )
+                return
+            if not dr:
+                QMessageBox.warning(
+                    self, "Selecione o período",
+                    "Nenhum mês/ano foi selecionado no Passo 3. Volte e marque "
+                    "ao menos 1 mês.",
+                )
+                return
+            # ========================================================= FIM BLOQUEIO
             req_args = dict(
                 information_system=system,
                 state_abbr=ufs,
