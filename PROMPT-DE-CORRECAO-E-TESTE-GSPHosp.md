@@ -20,75 +20,140 @@
 ==============================
 
 ================================================================================
- 0. REQUISITO BLOQUEANTE: PROMPTS ORIGINAIS DO USUÁRIO (O QUE VOCÊ DEVE
-                           RESOLVER. LEIA TUDO ANTES DE ESCREVER 1 LINHA).
+ 0. REQUISITO BLOQUEANTE: PROMPTS ORIGINAIS LITERAIS DO USUÁRIO
+                            (NÃO RESUMA, NÃO EDITE — ESTAS SÃO AS FRASES
+                            EXATAS QUE O USUÁRIO ESCREVEU)
 ================================================================================
-Abaixo estão AS QUEIXAS ORIGINAIS do usuário (4 interações). Você deve
-RESOLVER EXATAMENTE ESTES PROBLEMAS, não inventar outro. O usuário já
-tentou outro modelo e não teve resultado satisfatório. Portanto, analise
-TODO o código antes. NÃO faça suposições.
 
->>> PROMPT ORIGINAL #1 (primeiro report de carga quebrada, usuário frustrado):
-"A carga dos dados nao está funcionando. Selecionei MG para o ano de 2025
-inteiro, copiei o numero do código de um hospital e ele nao encontrou. Nao
-carrega os hospitais da base do CNES também. E nao faz o Recorte Geografico.
-REVEJA TODA A CARGA DOS DADOS E CONSERTE TUDO."
+>>> SESSÃO ANTERIOR (sessão 6a71584e97618adf3e51353c)
+    Objetivo geral da sessão: REVISAR TODA A LÓGICA DE INGESTÃO E FILTRAGEM
+    DE DADOS PARA CORRIGIR ERROS DE CARREGAMENTO E BUSCA.
 
->>> PROMPT ORIGINAL #2 (depois de várias correções ainda não funcionavam):
-"A carga dos dados ainda está com muito problema. Os botoes de Aplicar
-filtros geograficos e Carregar hospitais do CNES nao funcionam. E quando
-digito o codigo do CNES de um hospital conhecido (Hospital Dilson Godinho,
-Codigo CNES 2219646) o sistema nao o localiza. O botao Buscar Hospital
-tambem nao funciona. Teste tudo antes de me entregar!"
+    >>> PROMPT ORIGINAL #1 (sessão 6a71584e | 04/08/2026 ~09h)
+        USUÁRIO ESCREVEU EXATAMENTE (texto literal, sem acentos propositalmente):
+        -----------------------------------------------------------------------
+        "A carga dos dados nao esta funcionando. Selecionei MG para o ano de
+        2025 inteiro, copiei o numero do codigo de um hospital e ele nao
+        encontrou. Nao carrega os hospitais da base do CNES tambem. E nao
+        faz o Recorte Geografico. REVEJA TODA A CARGA DOS DADOS E CONSERTE
+        TUDO."
+        -----------------------------------------------------------------------
+        (Observação: depois deste prompt foi detectado que a base MG 2025
+         não retornava dados, a busca por códigos de hospitais específicos
+         não encontrava resultados, a base do CNES não carregava
+         estabelecimentos e o Recorte Geográfico estava inoperante.)
 
->>> PROMPT ORIGINAL #3 (usuário abriu UI real, enviou PRINTS com defeitos
-    concretos visiveis nas imagens — MAIS IMPORTANTE, pegue os sintomas):
-"A carga dos dados continua com muito problema. Consegui selecionar um
-hospital, o sistema começa aparentemente a baixar os arquivos, mas pára
-logo. O Aplicar filtro geografico continua sem funcionar. Voce acha que
-preciso levar para outro LLM?"
+    >>> PROMPT ORIGINAL #2 (sessão 6a71584e | 04/08/2026 ~12h57)
+        USUÁRIO ESCREVEU EXATAMENTE:
+        -----------------------------------------------------------------------
+        "E coloque um 'olhinho' na senha de login. Nao apareceu, embora voce
+        tivesse me dito que tinha colocado, para que se possa visualizar os
+        caracteres da senha."
+        -----------------------------------------------------------------------
+        (Observação: posteriormente também foi relatado que o app não abria
+         via Resetar-E-Abrir-GSPHosp.bat — causado por NameError: name
+         'QObject' is not defined em login_page.py, por falta de import
+         explícito. A cor do olhinho é #5EEAD4 — HC-2.)
 
-    >>> IMAGEM 1 (Anexo na sessão)
-        TÍTULO DO ALERTA NA TELA: "CNES não correspondem à área selecionada"
-        MENSAGEM COMPLETA:
-          "1 código(s) de CNES não foram encontrados na lista filtrada de
-           hospitais atuais.
-           Causas prováveis:
-           • O CNES não existe na base local do CNES.
-           • O CNES pertence a outra UF/Macro/DRS que a selecionada no Passo 2.
-           Códigos rejeitados: 2219646
-           Sugestão: revise a seleção geográfica no Passo 2 e clique em
-           '📍 Aplicar filtros geográficos' para recarregar a lista, ou use
-           '🔄 Carregar hospitais do CNES' para listar TODOS (sem filtro)."
-        OBSERVAÇÃO IMPORTANTE: O CNES 2219646 EXISTE e PERTENCE REALMENTE a
-        Minas Gerais (MG). O alerta é FALSO-POSITIVO.
+    >>> PROMPT ORIGINAL #3 (sessão 6a71584e | 04/08/2026 ~13h)
+        USUÁRIO ESCREVEU EXATAMENTE:
+        -----------------------------------------------------------------------
+        "Dei dois cliques no arquivo Resetar-E-Abrir-GSPHosp.bat e nao
+        aconteceu nada. Como abro o app?"
+        -----------------------------------------------------------------------
 
-    >>> IMAGEM 2 (Anexo na sessão)
-        TÍTULO DO ALERTA: "Erro no pipeline"
-        MENSAGEM COMPLETA:
-          "Nenhum arquivo encontrado no FTP para os parâmetros informados.
-           - Sistema: SIA tipo=PA UFs=['AC','AL','AM','AP','BA','CE','DF','ES',
-             'MA','MS','MT','PA','PB','PE','PI','RJ','RN','RO','RR','RS','SC',
-             'SE','SP']
-           - Janela: 2025-01-01..2025-12-01
-           Candidatos tentados (2 hosts x 6 paths):
-           Sugestões:
-           1) Verifica a data (ex: 2025/01 pode ainda nao ter sido publicado
-              no DATASUS).
-           2) Tenta 'ano INTEIRO anterior' (2024 completo - sempre tem arquivos).
-           3) Se na Web https://datasus.saude.gov.br/transferencia-de-arquivos/
-              existir arquivos em outra pasta, usa fonte 'Pasta compactada' e
-              aponte o arquivo .zip/.rar baixado."
-        OBSERVAÇÃO IMPORTANTE: O usuário SELECIONOU SÓ MINAS GERAIS NO PASSO 2.
-        Mas a mensagem mostra 27 UFs DO BRASIL INTEIRO sendo baixadas. Isso
-        É UM BUG CRÍTICO. O usuário NÃO pediu para baixar o Brasil inteiro.
+>>> SESSÃO ATUAL (sessão desta correção)
+    Objetivo: Mesma linha do anterior, só que agravado — usuários relatou
+    erros VISÍVEIS COM PRINT DE TELA, e cogitou migrar para outra LLM.
 
->>> PROMPT ORIGINAL #4 (usuário quer prompt para rodar em OUTRO modelo):
-"Crie um arquivo com a skill deste projeto e elabore um prompt detalhado do
-que voce fez para eu testar em outra ferramenta de IA.
-...
-Melhore o prompt com o prompt inicial que eu criei e voce seguiu. Vou ter
-que passar para outro modelo, pois voce nao está dando conta."
+    >>> PROMPT ORIGINAL #4 (04/08/2026)
+        USUÁRIO ESCREVEU EXATAMENTE (texto literal):
+        -----------------------------------------------------------------------
+        "A carga dos dados ainda esta com muito problema. Os botoes de
+        Aplicar filtros geograficos e Carregar hospitais do CNES nao
+        funcionam. E quando digito o codigo do CNES de um hospital conhecido
+        (Hospital Dilson Godinho, Codigo CNES 2219646) o sistema nao o
+        localiza. O botao Buscar Hospital tambem nao funciona. Teste tudo
+        antes de me entregar!"
+        -----------------------------------------------------------------------
+
+    >>> PROMPT ORIGINAL #5 (04/08/2026 — ACOMPANHADO DE 2 IMAGENS)
+        USUÁRIO ESCREVEU EXATAMENTE:
+        -----------------------------------------------------------------------
+        "A carga dos dados continua com muito problema. Consegui selecionar
+        um hospital, o sistema começa aparentemente a baixar os arqivos, mas
+        para logo. O Aplicar filtro geografico continua sem funcionar. Voce
+        acha que preciso levar para outro LLM?"
+        -----------------------------------------------------------------------
+
+        >>> IMAGEM 1 ANEXADA (screenshot tirado pelo usuário)
+            TÍTULO DA CAIXA DE DIÁLOGO: "CNES não correspondem à área selecionada"
+            TEXTO COMPLETO DA CAIXA (copiado literalmente da leitura OCR da
+            imagem que o usuário enviou; reproduza exatamente a validação que
+            estava ocorrendo):
+            -------------------------------------------------------------------
+            "⚠ 1 código(s) de CNES não foram encontrados na lista filtrada
+               de hospitais atuais.
+
+               Causas prováveis:
+               • O CNES não existe na base local do CNES.
+               • O CNES pertence a outra UF/Macro/DRS que a selecionada no
+                 Passo 2.
+
+               Códigos rejeitados: 2219646
+
+               Sugestão: revise a seleção geográfica no Passo 2 e clique em
+               '📍 Aplicar filtros geográficos' para recarregar a lista, ou
+               use '🔄 Carregar hospitais do CNES' para listar TODOS (sem
+               filtro)."
+            -------------------------------------------------------------------
+            OBSERVAÇÃO BLOQUEANTE:
+              CNES 2219646 = HOSPITAL DILSON GODINHO, PERTENCE REALMENTE a
+              Minas Gerais (MG), município 314330 = Patos de Minas, DRS 06.
+              A mensagem acima é UM ALERTA FALSO-POSITIVO que você DEVE
+              ELIMINAR. O usuário marcou MG no Passo 2 e o sistema rejeitou
+              mesmo assim.
+
+        >>> IMAGEM 2 ANEXADA (screenshot tirado pelo usuário)
+            TÍTULO DA CAIXA: "Erro no pipeline"
+            TEXTO COMPLETO (lido OCR literal da imagem):
+            -------------------------------------------------------------------
+            "❌ Nenhum arquivo encontrado no FTP para os parâmetros informados.
+             - Sistema: SIA tipo=PA UFs=['AC','AL','AM','AP','BA','CE','DF',
+               'ES','MA','MS','MT','PA','PB','PE','PI','RJ','RN','RO','RR',
+               'RS','SC','SE','SP']
+             - Janela: 2025-01-01..2025-12-01
+             Candidatos tentados (2 hosts x 6 paths):
+             Sugestões:
+             1) Verifica a data (ex: 2025/01 pode ainda nao ter sido
+                publicado no DATASUS).
+             2) Tenta 'ano INTEIRO anterior' (2024 completo - sempre tem
+                arquivos).
+             3) Se na Web https://datasus.saude.gov.br/transferencia-de-
+                arquivos/ existir arquivos em outra pasta, usa fonte 'Pasta
+                compactada' e aponte o arquivo .zip/.rar baixado."
+            -------------------------------------------------------------------
+            OBSERVAÇÃO BLOQUEANTE:
+              O USUÁRIO AFIRMA QUE SELECIONOU APENAS MINAS GERAIS (MG) NO
+              PASSO 2. A mensagem, porém, mostra AS 27 UFs DO BRASIL SENDO
+              PASSADAS NO PARÂMETRO. ISTO É UM BUG CRÍTICO DE FALLBACK QUE
+              VOCÊ DEVE BLOQUEAR EXPLICITAMENTE COM QMessageBox NO CLIQUE
+              DE "Executar Extração", NUNCA MAIS EXPANDIR PARA 27.
+
+    >>> PROMPT ORIGINAL #6 (04/08/2026)
+        USUÁRIO ESCREVEU EXATAMENTE:
+        -----------------------------------------------------------------------
+        "Crie um arquivo com a skill deste projeto e elabore um prompt
+        detalhado do que voce fez para eu testar em outra ferramenta de IA."
+        -----------------------------------------------------------------------
+
+    >>> PROMPT ORIGINAL #7 (04/08/2026)
+        USUÁRIO ESCREVEU EXATAMENTE:
+        -----------------------------------------------------------------------
+        "Melhore o prompt com o prompt inicial que eu criei e voce seguiu.
+        Vou ter que passar apra outro modelo, pois voce nao está dando
+        conta."
+        -----------------------------------------------------------------------
 
 >>> RESUMO OBRIGATÓRIO (você deve responder a estes 4 itens NA ORDEM):
    Item 1 → Corrigir o botão "📍 Aplicar filtros geográficos" para realmente
