@@ -158,17 +158,93 @@ def _find_csv(key: str) -> Path | None:
     return None
 
 
+def _detect_csv_params(path: Path) -> dict[str, object]:
+    """Autodetecta (separator, encoding, quote_char) para arquivos CSV do CNES/DATASUS.
+
+    Motivo: CSVs do CNES variam muito por origem:
+      - Separador: ';' (padrao DATASUS Windows export), ',' (Unix export), tab, pipe.
+      - Encoding: UTF-8 com BOM / UTF-8 lossy, latin-1 (cp1252 é compatível).
+      - Quote: '"' (padrão) ou sem aspas.
+    Faz 12 tentativas e escolhe a configuração que retorna MAIS COLUNAS.
+    """
+    candidates_sep = [";", ",", "\t", "|"]
+    candidates_enc = ["utf8-lossy", "latin-1", "utf8", "windows-1252"]
+    best_cols = 0
+    best: dict[str, object] | None = None
+    for sep in candidates_sep:
+        for enc in candidates_enc:
+            try:
+                df = pl.read_csv(
+                    path,
+                    n_rows=3,
+                    separator=sep,
+                    encoding=enc,
+                    quote_char='"',
+                    infer_schema=False,
+                    low_memory=True,
+                    ignore_errors=True,
+                    truncate_ragged_lines=True,
+                    try_parse_dates=False,
+                )
+                ncols = len(df.columns)
+                if ncols > best_cols and "CO_CNES" in df.columns or ncols >= 10:
+                    # Vitoria se houver CO_CNES conhecido ou >=10 colunas.
+                    if "CO_CNES" in df.columns or ncols > best_cols:
+                        best_cols = ncols
+                        best = dict(
+                            separator=sep,
+                            encoding=enc,
+                            quote_char='"',
+                            infer_schema=False,
+                            low_memory=True,
+                            ignore_errors=True,
+                            truncate_ragged_lines=True,
+                            try_parse_dates=False,
+                            infer_schema_length=5000,
+                        )
+                        if "CO_CNES" in df.columns and ncols >= 20:
+                            return best
+            except Exception:
+                continue
+    if best is None:
+        # Fallback conservador (CSV DATASUS 99% das vezes)
+        best = dict(
+            separator=";", encoding="utf8-lossy", quote_char='"',
+            infer_schema=False, low_memory=True, ignore_errors=True,
+            truncate_ragged_lines=True, try_parse_dates=False, infer_schema_length=5000,
+        )
+    return best
+
+
 def _read_cnes_csv(path: Path, **overrides) -> pl.DataFrame:
-    opts = dict(
-        separator=";",
-        encoding="latin-1",
-        infer_schema_length=5000,
-        ignore_errors=True,
-        truncate_ragged_lines=True,
-        try_parse_dates=False,
-    )
-    opts.update(overrides)
-    return pl.read_csv(path, **opts)
+    """Leitor CNES com AUTO-DETECAO de separador/encoding.
+
+    Importante: nao ha um separador universal entre os CSVs do dicionario do
+    CNES exportados. O arquivo tbEstabelecimento*.csv costuma ser ';' + quoted.
+    """
+    auto = _detect_csv_params(path)
+    auto.update(overrides)
+    try:
+        return pl.read_csv(path, **auto)
+    except Exception as exc_read:  # noqa: BLE001
+        log.warning("[CNES] Tentativa auto falhou (%s). Usando fallback leitura binaria.", exc_read)
+        # Ultimo recurso: le como texto puro e parseia manualmente os params
+        try:
+            raw = Path(path).read_bytes()[:64000]
+            has_semi = raw.count(b";")
+            has_comma = raw.count(b",")
+            sep = ";" if has_semi >= has_comma else ","
+            return pl.read_csv(
+                path,
+                separator=sep, encoding="utf8-lossy", quote_char='"',
+                infer_schema=False, low_memory=True, ignore_errors=True,
+                truncate_ragged_lines=True, try_parse_dates=False,
+                infer_schema_length=5000, **overrides,
+            )
+        except Exception as exc2:
+            raise RuntimeError(
+                f"Falhou ao ler {path.name} apos autodetect e fallback. {exc2}"
+            ) from exc2
 
 
 @dataclass(slots=True)
@@ -256,6 +332,46 @@ class CNESData:
         ]
         if exprs:
             df = df.with_columns(exprs)
+
+        # CRITICAL: Garante coluna SIGLA_UF sempre preenchida, independentemente
+        # de qual coluna estiver disponível (CO_ESTADO_GESTOR, CO_UF (cód IBGE 2dig),
+        # ou colunas diversas. Sem ela, uf_hospital=""" fica vazia e a cascata cai.
+        from papahr.geo.reference import UF_CODIBGE_TO_SIGLA
+        expr_cod_to_sigla = UF_CODIBGE_TO_SIGLA
+        uf_exprs: list[pl.Expr] = []
+        if "SIGLA_ESTADO_GESTOR" in df.columns:
+            uf_exprs.append(pl.col("SIGLA_ESTADO_GESTOR").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+        if "SIGLA_UF_GESTOR" in df.columns:
+            uf_exprs.append(pl.col("SIGLA_UF_GESTOR").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+        if "SG_UF" in df.columns:
+            uf_exprs.append(pl.col("SG_UF").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+        if "UF" in df.columns:
+            uf_exprs.append(pl.col("UF").cast(pl.Utf8).str.strip_chars().str.to_uppercase())
+        for col_cod in ("CO_ESTADO_GESTOR", "CO_UF_GESTOR", "CO_UF_IBGE"):
+            if col_cod in df.columns:
+                cod_raw = pl.col(col_cod).cast(pl.Utf8).str.strip_chars().str.zfill(2)
+                mapped = cod_raw.replace(expr_cod_to_sigla, default="").alias("__uf_cod")
+                uf_exprs.append(mapped)
+        if "CO_MUNICIPIO_GESTOR" in df.columns:
+            cod_raw = pl.col("CO_MUNICIPIO_GESTOR").cast(pl.Utf8).str.strip_chars()
+            dois_primeiros = cod_raw.str.slice(0, 2).str.zfill(2)
+            mapped_do_mun = dois_primeiros.replace(expr_cod_to_sigla, default="").alias("__uf_mun")
+            uf_exprs.append(mapped_do_mun)
+        if uf_exprs:
+            if "SIGLA_UF" in df.columns:
+                df = df.with_columns(
+                    pl.when(pl.col("SIGLA_UF").is_not_null() & (pl.col("SIGLA_UF") != ""))
+                      .then(pl.col("SIGLA_UF"))
+                      .otherwise(pl.coalesce(uf_exprs + [pl.lit("")]))
+                      .alias("SIGLA_UF")
+                )
+            else:
+                df = df.with_columns(
+                    pl.coalesce(uf_exprs + [pl.lit("")]).alias("SIGLA_UF")
+                )
+        elif "SIGLA_UF" not in df.columns:
+            df = df.with_columns(pl.lit("").alias("SIGLA_UF"))
+
         if "NU_LEITOS_SUS" in df.columns:
             df = df.with_columns(pl.col("NU_LEITOS_SUS").cast(pl.Float64, strict=False).fill_null(0))
         self.estabelecimentos = df

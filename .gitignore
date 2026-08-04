@@ -29,6 +29,11 @@ env/
 data-raw/
 output/
 
+# Arquivos temporarios de debug / teste (debug / script) local
+_tmp_*
+_teste_*
+_resultado_*
+
 # ---------------------------
 # DADOS SENSÍVEIS SUS (NÃO COMMITAR!)
 # Perfil do usuário %USERPROFILE%\.gsphosp\ (ou antigo %USERPROFILE%\.papahr\)

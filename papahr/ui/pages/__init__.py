@@ -1760,16 +1760,19 @@ class PipelinePage(QWidget):
                         if col in edf.columns:
                             cod = edf[col].cast(pl.Utf8).fill_null(pl.lit("")).str.strip_chars().to_list()
                             break
-                    # UF
+                    # UF: NOVA coluna 'SIGLA_UF' é GARANTIDA pelo _normalize_estabs() do CNESLoader.
                     uf: Optional[list[str]] = None
-                    for col in ("SIGLA_ESTADO_GESTOR", "SIGLA_UF_GESTOR", "SIGLA_UF",
+                    for col in ("SIGLA_UF",
+                                "SIGLA_ESTADO_GESTOR", "SIGLA_UF_GESTOR", "SIGLA_UF",
                                 "UF", "SG_UF", "SG_UF_GESTOR", "SG_ESTADO",
                                 "CO_ESTADO_GESTOR", "CO_UF_GESTOR", "CO_UF"):
                         if col in edf.columns:
                             vals = edf[col].cast(pl.Utf8).fill_null(pl.lit("")).to_list()
                             if col.startswith("CO_"):
                                 mapping = _UF_CODIBGE_TO_SIGLA
-                                vals = [mapping.get(str(v).zfill(2), v) for v in vals]
+                                vals = [mapping.get(str(v).zfill(2), str(v)) for v in vals]
+                            else:
+                                vals = [str(v).strip().upper() for v in vals]
                             uf = vals
                             break
                     # Tipo estabelecimento

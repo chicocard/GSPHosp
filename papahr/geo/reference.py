@@ -8,6 +8,8 @@ genérica" para os outros 17 (garante que o UI sempre vai ter algo para mostrar)
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 # -----------------------------------------------------------------------------
 # 1. Cadastro nacional de UFs (27 unidades federativas, IBGE 2022)
 # -----------------------------------------------------------------------------
@@ -644,6 +646,16 @@ def hospital_bate_geo(
     Usado no Passo 4 do Wizard para filtrar `_hospitals_data` tanto na Heurística 1
     (DuckDB) quanto na Heurística 2 (CNES local tbEstabelecimento). Elimina código
     duplicado e garante a mesma regra em todas as fontes.
+
+    Regras rígidas:
+      1) Se UF do hospital vier vazio, tenta INFERIR via CO_MUNICIPIO (2 primeiros
+         dígitos) ou CO_ESTADO_GESTOR. Se não for possível → False.
+      2) Se sel_ufs estiver preenchido, UF do hospital DEVE estar na lista.
+      3) sel_macros / sel_drs SÓ são válidos se PERTENCEREM à UF do hospital.
+         Isso impede que o usuário selecione "Macros do RJ" e hospitais de MG ainda
+         passem (bug de filtro cascata que existia antes desta correção).
+      4) Match Macro/DRS pode ser por: texto exato, código (MR05, DRS 12), ou prefixo
+         8/10 chars (robusto contra acentuação / espaços).
     """
     sel_ufs = [u.strip().upper() for u in (sel_ufs or []) if u and u.strip()]
     sel_macros = [m.strip() for m in (sel_macros or []) if m and m.strip()]
@@ -654,6 +666,15 @@ def hospital_bate_geo(
 
     uf_h = (uf_hospital or "").strip().upper()
 
+    # Fallback: se UF veio vazia, tenta enriquecer via município/cod_regiao
+    if not uf_h and (co_municipio_hospital or co_regiao_saude_hospital):
+        (uf_por_enriq, _m, _cm, _nm, _cd, _nd) = resolve_geo_enrichment(
+            uf_sigla=None,
+            co_municipio_6dig=co_municipio_hospital,
+            co_regiao_saude_cnes_cod=co_regiao_saude_hospital,
+        )
+        uf_h = (uf_por_enriq or "").strip().upper()
+
     if sel_ufs:
         if not uf_h or uf_h not in sel_ufs:
             return False
@@ -662,6 +683,32 @@ def hospital_bate_geo(
         return True
 
     if not uf_h:
+        return False
+
+    # === REGRA 3: sel_macros/sel_drs DEVEM INTERSECTAR com a hierarquia DA UF ===
+    macros_da_uf = set(lista_macrorregioes(uf_h))
+    drs_da_uf    = set(lista_drs(uf_h))
+
+    def _qualquer_macro_da_uf(selecionadas: Iterable[str]) -> bool:
+        """Retorna True se pelo menos 1 macro selecionada PERTENCE a uf_h.
+
+        REGRA RÍGIDA: igualdade EXATA (case/whitespace insensitive já foi tratado
+        na normalização). NÃO usamos prefixo/código aqui para evitar falsos
+        positivos: MG tem "MR01 - Metropolitana Belo Horizonte" e RJ também tem
+        "MR01 - Metropolitana I" — mesmo código MR01, UFs diferentes.
+        Sem essa regra rígida, o usuário escolhia "Macros do RJ" por engano e
+        hospitais de MG ainda apareciam (controle negativo quebrado).
+        """
+        sels = set(s.strip() for s in selecionadas if s and s.strip())
+        return len(sels & macros_da_uf) > 0
+
+    def _qualquer_drs_da_uf(selecionadas: Iterable[str]) -> bool:
+        sels = set(s.strip() for s in selecionadas if s and s.strip())
+        return len(sels & drs_da_uf) > 0
+
+    if sel_macros and not _qualquer_macro_da_uf(sel_macros):
+        return False
+    if sel_drs and not _qualquer_drs_da_uf(sel_drs):
         return False
 
     _uf, _mun, co_macro, no_macro, co_drs, no_drs = resolve_geo_enrichment(
@@ -674,7 +721,10 @@ def hospital_bate_geo(
         bate_macro = False
         for sm in sel_macros:
             sm_s = sm.strip()
-            if sm_s == no_macro or (co_macro and co_macro in sm_s) or sm_s.startswith(no_macro[:8]):
+            if (sm_s == no_macro
+                    or (co_macro and co_macro in sm_s)
+                    or sm_s.startswith(no_macro[:8])
+                    or no_macro.startswith(sm_s[:8])):
                 bate_macro = True
                 break
         if not bate_macro:
@@ -684,7 +734,10 @@ def hospital_bate_geo(
         bate_drs = False
         for sd in sel_drs:
             sd_s = sd.strip()
-            if sd_s == no_drs or (co_drs and co_drs in sd_s) or sd_s.startswith(no_drs[:10]):
+            if (sd_s == no_drs
+                    or (co_drs and co_drs in sd_s)
+                    or sd_s.startswith(no_drs[:10])
+                    or no_drs.startswith(sd_s[:10])):
                 bate_drs = True
                 break
         if not bate_drs:
