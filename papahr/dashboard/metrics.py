@@ -203,7 +203,7 @@ READMISSAO_BENCHMARK: dict[str, float] = {k: v["readmissao_30d_pct"] for k, v in
 def _cid_prefix(cid: str | None, n: int = 3) -> str:
     if not cid:
         return ""
-    s = str(cid).strip()
+    s = str(cid).strip().upper()
     if n > len(s):
         n = len(s)
     return s[:n]
@@ -368,12 +368,20 @@ def _kpis_globais(prod: pl.DataFrame, cnes_df: pl.DataFrame, kind: str) -> dict[
         "vl_total_apresentado", "VAL_SH", "VAL_SP", "VAL_SADH"
     ):
         if col in prod.columns:
-            out["valor_total_R$"] = float(prod[col].cast(pl.Float64, strict=False).sum() or 0)
+            if prod[col].dtype == pl.Utf8:
+                val_col = prod[col].str.replace(",", ".").cast(pl.Float64, strict=False)
+            else:
+                val_col = prod[col].cast(pl.Float64, strict=False)
+            out["valor_total_R$"] = float(val_col.sum() or 0)
             break
     # Dias de permanência (apenas SIH)
     for col in ("QT_DIARIAS", "QT_PERMANENCIA", "DIAS_PERM"):
         if col in prod.columns:
-            out["dias_permanencia_total"] = float(prod[col].cast(pl.Float64, strict=False).sum() or 0)
+            if prod[col].dtype == pl.Utf8:
+                val_col = prod[col].str.replace(",", ".").cast(pl.Float64, strict=False)
+            else:
+                val_col = prod[col].cast(pl.Float64, strict=False)
+            out["dias_permanencia_total"] = float(val_col.sum() or 0)
             break
     # Leitos instalados
     if not cnes_df.is_empty():
@@ -401,12 +409,14 @@ def _count_icsap(prod: pl.DataFrame) -> int:
 
 def _find_col(df: pl.DataFrame | Iterable[str], candidates: tuple[str, ...]) -> str | None:
     cols_list = df.columns if hasattr(df, "columns") else list(df)
-    cols_lower = {str(c).lower().replace(" ", "_").replace("-", "_"): str(c) for c in cols_list}
+    cols_lower = {str(c).lower().strip().replace(" ", "_").replace("-", "_"): str(c) for c in cols_list}
     for p in candidates:
-        pn = p.lower().replace(" ", "_").replace("-", "_")
+        pn = p.lower().strip().replace(" ", "_").replace("-", "_")
         if pn in cols_lower:
             return cols_lower[pn]
-        # Fallback: substrings parciais (ex: "NU_CID10_PRINCIPAL" bate "CID10")
+    # Fallback: substrings parciais (ex: "NU_CID10_PRINCIPAL" bate "CID10")
+    for p in candidates:
+        pn = p.lower().strip().replace(" ", "_").replace("-", "_")
         for norm, orig in cols_lower.items():
             if pn in norm or norm in pn:
                 return orig
@@ -416,7 +426,7 @@ def _find_col(df: pl.DataFrame | Iterable[str], candidates: tuple[str, ...]) -> 
 def _strata_lace_lookup(cols: list[str]) -> tuple[str | None, str | None, str | None, str | None]:
     """Tenta detectar colunas LACE: LOS / Emergência / Charlson / Visitas PS."""
     los = _find_col_by_keyword(cols, ("qtd_diarias", "qt_diarias", "qt_permanencia", "los", "dias_permanencia",
-                                     "tempo_internacao", "length_stay"))
+                                     "tempo_internacao", "length_stay", "dias_perm"))
     acuity = _find_col_by_keyword(cols, ("tp_internacao", "carater_atendimento", "carater_internacao",
                                          "admissao_emergencia", "emergencia"))
     charlson = _find_col_by_keyword(cols, ("charlson", "cci", "comorbidades", "comorbidade", "numero_comorbidades"))
@@ -446,7 +456,7 @@ def _estrato_risco_hospital(prod: pl.DataFrame) -> pl.DataFrame:
         # LOS
         if col_los:
             try:
-                los = float(row.get(col_los, 0) or 0)
+                los = float(str(row.get(col_los, 0) or 0).replace(',', '.'))
                 if los < 1:
                     score += 0
                 elif los <= 3:
@@ -470,7 +480,7 @@ def _estrato_risco_hospital(prod: pl.DataFrame) -> pl.DataFrame:
         # Charlson (proxi por CID prefixos)
         if col_ch:
             try:
-                ch = float(row.get(col_ch, 0) or 0)
+                ch = float(str(row.get(col_ch, 0) or 0).replace(',', '.'))
                 score += min(int(ch), 6)
             except (TypeError, ValueError):
                 pass
@@ -536,8 +546,14 @@ def _eficiencia_clinica(prod: pl.DataFrame) -> pl.DataFrame:
     for r in rows:
         cnes = str(r.get(cnes_col, ""))
         cid = str(r.get(cid_col or "__", ""))
-        los = float(r.get(los_col, 0) or 0) if los_col else 0.0
-        val = float(r.get(val_col, 0) or 0) if val_col else 0.0
+        try:
+            los = float(str(r.get(los_col, 0) or 0).replace(',', '.')) if los_col else 0.0
+        except ValueError:
+            los = 0.0
+        try:
+            val = float(str(r.get(val_col, 0) or 0).replace(',', '.')) if val_col else 0.0
+        except ValueError:
+            val = 0.0
         bucket = agg.setdefault(cnes, {"n": 0.0, "los_sum": 0.0, "val_sum": 0.0,
                                         "los_esperado_sum": 0.0, "custo_esperado_sum": 0.0, "drg_weight_sum": 0.0})
         linha = _categoria_linha(cid)
@@ -630,8 +646,8 @@ def _integracao_territorial(prod: pl.DataFrame, cnes_df: pl.DataFrame,
     df = pl.DataFrame(flat) if flat else pl.DataFrame()
     # Coordenadas geográficas
     if not cnes_df.is_empty() and not df.is_empty() and "CO_CNES" in cnes_df.columns:
-        df = df.with_columns(pl.col("cnes").cast(pl.Utf8, strict=False))
-        geo = cnes_df.select([pl.col("CO_CNES").cast(pl.Utf8, strict=False).alias("CO_CNES"), "NU_LATITUDE", "NU_LONGITUDE"])
+        df = df.with_columns(pl.col("cnes").cast(pl.Utf8, strict=False).str.strip_chars())
+        geo = cnes_df.select([pl.col("CO_CNES").cast(pl.Utf8, strict=False).str.strip_chars().alias("CO_CNES"), "NU_LATITUDE", "NU_LONGITUDE"])
         df = df.join(geo, left_on="cnes", right_on="CO_CNES", how="left")
     if df.is_empty() or "icsap_pct" not in df.columns:
         return df

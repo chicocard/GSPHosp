@@ -257,9 +257,9 @@ class HospitalChipButton(ChipButton):
                 border-color: #EF4444;
             }
             QPushButton:checked {
-                background: #133E3A;
-                color: #5EEAD4;
-                border: 1px solid #14B8A6;
+                background: #0D9488;
+                color: #FFFFFF;
+                border: 2px solid #5EEAD4;
             }
             QPushButton:checked:hover {
                 background: #991B1B;

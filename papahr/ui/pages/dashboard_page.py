@@ -976,20 +976,28 @@ class DashboardPage(QWidget):
             for c in cat:
                 col = f"pct_{c}"
                 vals.append(float(df[col].mean()) if col in df.columns else 0.0)
-            x = list(range(len(cat)))
-            bg = pg.BarGraphItem(x=x, height=vals, width=0.35,
-                                 brushes=[_brush(_DANG), _brush(_WARN), _brush(_OK)])
-            self.plot_estratos.addItem(bg)
+            
+            w = 0.5
+            b1 = pg.BarGraphItem(x=[0], height=[vals[0]], width=w, brush=_brush(_DANG))
+            b2 = pg.BarGraphItem(x=[1], height=[vals[1]], width=w, brush=_brush(_WARN))
+            b3 = pg.BarGraphItem(x=[2], height=[vals[2]], width=w, brush=_brush(_OK))
+            self.plot_estratos.addItem(b1)
+            self.plot_estratos.addItem(b2)
+            self.plot_estratos.addItem(b3)
+            
             ax = self.plot_estratos.getAxis("bottom")
-            ax.setTicks([[ (i, c) for i, c in enumerate(cat) ]])
+            ax.setTicks([[(0, "Alto"), (1, "Médio"), (2, "Baixo")]])
             self.plot_estratos.setXRange(-0.8, 2.8)
-            self.plot_estratos.setYRange(0, 105)
+            ymax = max(100.0, max(vals) * 1.1) if any(vals) else 100.0
+            self.plot_estratos.setYRange(0, ymax, padding=0)
+            self.plot_estratos.setLimits(yMin=0, yMax=ymax)
             self.plot_estratos.setTitle(f"Estratos — ALTO={vals[0]:.1f}%, MÉDIO={vals[1]:.1f}%, BAIXO={vals[2]:.1f}%",
                                         color=_TXT, size="10pt")
         # CMI
         if pg is not None and not m.eficiencia_clinica.is_empty() and "case_mix_index" in m.eficiencia_clinica.columns:
             self.plot_cmi.clear()
-            cmi = m.eficiencia_clinica["case_mix_index"].to_numpy()
+            s_cmi = m.eficiencia_clinica["case_mix_index"].fill_null(0.0).fill_nan(0.0)
+            cmi = s_cmi.to_numpy()
             cnes = m.eficiencia_clinica["cnes"].to_list()
             y = cmi
             x = list(range(len(y)))
@@ -1002,6 +1010,7 @@ class DashboardPage(QWidget):
                      for i, c in enumerate(cnes) if i % max(1, len(x)//12) == 0]
                 ])
                 self.plot_cmi.setXRange(-0.5, len(x)-0.5, padding=0)
+                self.plot_cmi.setLimits(xMin=-0.5, xMax=len(x)-0.5, yMin=0)
             # média CMI
             avg = float(y.mean()) if len(y) else 0.0
             ln = pg.InfiniteLine(pos=avg, angle=0, pen=_pen(_WARN, 2))
@@ -1016,7 +1025,7 @@ class DashboardPage(QWidget):
         if pg is not None and not df.is_empty() and "los_o_e" in df.columns:
             self.plot_los.clear()
             labels = df["cnes"].to_list()
-            oe = df["los_o_e"].to_numpy().tolist()
+            oe = df["los_o_e"].fill_null(0.0).fill_nan(0.0).to_numpy().tolist()
             x = list(range(len(oe)))
             colors = [_color_for_pct(50 if v < 1 else 50 + (v-1)*50).name() for v in oe]
             bg = pg.BarGraphItem(x=x, height=oe, width=0.35,
@@ -1032,7 +1041,7 @@ class DashboardPage(QWidget):
         if pg is not None and not df.is_empty() and "custo_o_e" in df.columns:
             self.plot_custo.clear()
             labels = df["cnes"].to_list() if "cnes" in df.columns else []
-            ce = df["custo_o_e"].to_numpy().tolist()
+            ce = df["custo_o_e"].fill_null(0.0).fill_nan(0.0).to_numpy().tolist()
             colors_c = [_color_for_pct(50 if v < 1 else 50 + (v-1)*50).name() for v in ce]
             x = list(range(len(ce)))
             bg = pg.BarGraphItem(x=x, height=ce, width=0.35,

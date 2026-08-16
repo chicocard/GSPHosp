@@ -8,7 +8,7 @@ GSPHosp — Testes FASE 1 (sem GUI)
 [PASS] Teste 8-macros-RJ: retorno=False (esperado False; 3 macros RJ testadas)
 [PASS] Teste 9-uf-vazia: retorno=True (esperado True)
 [PASS] Teste 11-cascata: retorno=True macros=['MR02 - Triângulo / Alto Paranaíba'] drs=['DRS 06 - Patos de Minas'] (esperado True)
-[PASS] Teste 10-selected-ufs: verificado via texto (PySide6 indisponivel: invalid syntax (dashboard_page.py, line 3186))
+[PASS] Teste 10-selected-ufs: corpo de _selected_ufs sem fallback 'or list(get_ufs())'
 [PASS] Teste 1-sigla-uf: SIGLA_UF presente=True n_unique=27
 [PASS] Teste 2-linhas: linhas=598,661 (esperado >= 500.000)
 [PASS] Teste 3-mg: MG=73,985 (esperado 70.000-80.000)
