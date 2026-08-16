@@ -1,0 +1,9 @@
+# =====================================================
+# Instalação TOTAL (ordem correta, falha em LLM não bloqueia UI/core)
+# Execute cada linha separadamente:
+#   pip install -r requirements-core.txt
+#   pip install -r requirements-ui.txt
+#   (opcional) pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# =====================================================
+-r requirements-core.txt
+-r requirements-ui.txt

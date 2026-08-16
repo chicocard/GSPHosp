@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "papahr"
+version = "2.0.0"
+description = "PaPAHR - Pacote da Produtividade Ambulatorial e Hospitalar em Python (clone melhorado)"
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+license = {text = "MIT"}
+authors = [
+    {name = "PaPAHR Team"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "polars>=0.20.0",
+    "pyarrow>=14.0.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "httpx>=0.25.0",
+    "aioftp>=0.22.0",
+    "dbfread>=2.0.7",
+    "structlog>=24.1.0",
+    "rich>=13.7.0",
+    "tqdm>=4.66.0",
+    "tenacity>=8.2.0",
+    "python-dateutil>=2.8.0",
+    "keyring>=25.0.0",
+    "cryptography>=42.0.0",
+    "duckdb>=1.0.0",
+    "argon2-cffi>=23.1.0",
+]
+
+[project.optional-dependencies]
+# NOTA: llama-cpp-python sdist tem paths extremamente longos que falham em
+# Windows sem Long Paths. Use o wheel pré-compilado (CPU-only) via:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# Para GPU/CUDA/Vulkan: veja https://abetlen.github.io/llama-cpp-python/install.html
+llm = [
+    "llama-cpp-python>=0.2.50; platform_system != \"Windows\"",
+]
+ui = [
+    "PySide6>=6.6.0",
+    "qt-material>=2.14.0",
+    "pyqtgraph>=0.13.0",
+]
+dev = [
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.23.0",
+    "pyinstaller>=6.3.0",
+]
+all = ["papahr[ui,dev]"]
+
+[project.scripts]
+papahr-cli = "papahr.cli:main"
+papahr-gui = "papahr.ui.app:main"
+gsphosp-cli = "papahr.cli:main"
+gsphosp-gui = "papahr.ui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["papahr*"]
+exclude = ["tests*", "scripts*"]
+
+[tool.setuptools.package-data]
+papahr = ["data/*.parquet", "data/*.csv", "data/*.json", "ui/styles/*.qss"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --strict-markers"

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gauntlet Loop Status Dashboard — GSPHosp v2.0.0</title>
+    <style>
+        :root {
+            --bg-color: #0F172A;
+            --card-bg: #1E293B;
+            --border-color: #334155;
+            --accent-teal: #14B8A6;
+            --accent-green: #22C55E;
+            --accent-yellow: #EAB308;
+            --accent-red: #EF4444;
+            --text-main: #F8FAFC;
+            --text-muted: #94A3B8;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 24px;
+            line-height: 1.5;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 16px;
+            margin-bottom: 24px;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            color: var(--accent-teal);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .badge-status {
+            background-color: #15803D;
+            color: #FFFFFF;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 14px;
+            letter-spacing: 0.5px;
+        }
+
+        .grid-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .kpi-card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .kpi-title {
+            color: var(--text-muted);
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .kpi-value {
+            font-size: 28px;
+            font-weight: 800;
+            margin-top: 6px;
+            color: var(--text-main);
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            color: var(--accent-teal);
+            border-left: 4px solid var(--accent-teal);
+            padding-left: 10px;
+        }
+
+        .table-history {
+            width: 100%;
+            border-collapse: collapse;
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            margin-bottom: 32px;
+        }
+
+        .table-history th, .table-history td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .table-history th {
+            background-color: #0F172A;
+            color: var(--text-muted);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .table-history tr:last-child td {
+            border-bottom: none;
+        }
+
+        .verdict-approved {
+            color: #4ADE80;
+            font-weight: 700;
+            background: #14532D;
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block;
+        }
+
+        .verdict-ratchet {
+            color: #FEF08A;
+            font-weight: 700;
+            background: #854D0E;
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block;
+        }
+
+        .contract-box {
+            background: #1E293B;
+            border: 1px dashed var(--accent-teal);
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 24px;
+        }
+
+        .contract-box h3 {
+            margin-top: 0;
+            color: var(--accent-teal);
+        }
+
+        .contract-list {
+            margin: 0;
+            padding-left: 20px;
+            color: var(--text-muted);
+        }
+
+        .contract-list li {
+            margin-bottom: 6px;
+        }
+
+        .contract-list strong {
+            color: var(--text-main);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>🛡️ Gauntlet Loop Status — GSPHosp v2.0.0</h1>
+        <span class="badge-status">✅ CATRACA ATIVA & 100% APROVADO</span>
+    </div>
+
+    <div class="grid-summary">
+        <div class="kpi-card">
+            <div class="kpi-title">Módulos Auditados</div>
+            <div class="kpi-value" style="color:#14B8A6;">4 / 4</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Veredicto da Catraca</div>
+            <div class="kpi-value" style="color:#22C55E;">APROVADO</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Testes de Regressão</div>
+            <div class="kpi-value" style="color:#22C55E;">16 PASS / 0 FAIL</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Legibilidade (AAA)</div>
+            <div class="kpi-value" style="color:#22C55E;">100 % (0 texto escuro)</div>
+        </div>
+    </div>
+
+    <div class="section-title">Histórico do Gauntlet Loop por Módulo</div>
+
+    <table class="table-history">
+        <thead>
+            <tr>
+                <th>Rodada</th>
+                <th>Módulo Avaliado</th>
+                <th>Candidato vs Referência</th>
+                <th>Veredicto do Crítico Cego</th>
+                <th>Status da Catraca (Ratchet)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>#1</strong></td>
+                <td><strong>Módulo 1: Pipeline & Extraction Engine</strong></td>
+                <td>Pós-filtro geográfico vetorizado Polars vs CSV CNES local</td>
+                <td><span class="verdict-approved">APROVADO</span></td>
+                <td><span class="verdict-ratchet">RETIDO NA CATRACA</span> (0 perdas de hospitais)</td>
+            </tr>
+            <tr>
+                <td><strong>#2</strong></td>
+                <td><strong>Módulo 2: Motor de Métricas de Saúde</strong></td>
+                <td>Modelo Huff, ICSAP 16 grupos, LACE, CMI vs `refs/MANUAL_BENCHMARKS.md`</td>
+                <td><span class="verdict-approved">APROVADO</span></td>
+                <td><span class="verdict-ratchet">RETIDO NA CATRACA</span> (Join Utf8 resiliente)</td>
+            </tr>
+            <tr>
+                <td><strong>#3</strong></td>
+                <td><strong>Módulo 3: Interface & Contraste Visual</strong></td>
+                <td>Layout 3 linhas sem corte, botões branco/amarelo em QSS vs `refs/UI_LAYOUT_SPEC.md`</td>
+                <td><span class="verdict-approved">APROVADO</span></td>
+                <td><span class="verdict-ratchet">RETIDO NA CATRACA</span> (Legibilidade AAA)</td>
+            </tr>
+            <tr>
+                <td><strong>#4</strong></td>
+                <td><strong>Módulo 4: Persistência & Medallion DuckDB</strong></td>
+                <td>DuckDB connection locks & zoneinfo Polars vs `contract.md`</td>
+                <td><span class="verdict-approved">APROVADO</span></td>
+                <td><span class="verdict-ratchet">RETIDO NA CATRACA</span> (Cargas salvas)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="contract-box">
+        <h3>📜 Ancoragem do Contrato Técnico (contract.md)</h3>
+        <ul class="contract-list">
+            <li><strong>Invariante #1</strong>: 100% de resiliência em tipos Polars `cast(pl.Utf8, strict=False)` nas chaves `hospital_cnes` e `cnes`.</li>
+            <li><strong>Invariante #2</strong>: 0 botões com texto escuro `#0F1A1C` ou `#041413` no QSS. Texto primário em `#FFFFFF` e hover em `#FEF08A`.</li>
+            <li><strong>Invariante #3</strong>: Dashboard toolbar organizada em 3 linhas sem corte de botões em 1280x720.</li>
+            <li><strong>Invariante #4</strong>: Sincronismo automático do container de prévia de dados (`_preview_content_widget`).</li>
+        </ul>
+    </div>
+
+</body>
+</html>
