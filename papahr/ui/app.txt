@@ -1,0 +1,11 @@
+import sys
+import traceback
+
+def qt_exception_hook(exctype, value, tb):
+    print("=" * 60)
+    print("CRASH / UNCAUGHT EXCEPTION NO QT:")
+    traceback.print_exception(exctype, value, tb)
+    print("=" * 60)
+    sys.__excepthook__(exctype, value, tb)
+
+sys.excepthook = qt_exception_hook
