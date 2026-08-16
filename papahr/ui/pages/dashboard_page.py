@@ -12,6 +12,7 @@ Layout (Qt + pyqtgraph):
 from __future__ import annotations
 
 import math
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -955,301 +956,370 @@ class DashboardPage(QWidget):
 
     # ------------------------------------------------------------------
     def _fill_kpis(self, m: DashboardMetrics) -> None:
-        k = m.kpis
-        self.kpi_estabs.set_value(int(k.get("n_estabelecimentos", 0)))
-        self.kpi_prod.set_value(int(k.get("n_aihs_ou_apacs", 0)))
-        self.kpi_valor.set_value(float(k.get("valor_total_R$", 0.0)))
-        self.kpi_icsap.set_value(float(k.get("icsap_pct", 0.0)))
-        self.kpi_los.set_value(float(k.get("dias_permanencia_total", 0.0))
-                                / max(1, int(k.get("n_aihs_ou_apacs", 1)))
-                                if k.get("n_aihs_ou_apacs", 0) > 0 else 0.0)
-        self.kpi_readm.set_value(float(k.get("readmissao_30d_est_pct", 0.0)))
+        try:
+            k = m.kpis
+            self.kpi_estabs.set_value(int(k.get("n_estabelecimentos", 0)))
+            self.kpi_prod.set_value(int(k.get("n_aihs_ou_apacs", 0)))
+            self.kpi_valor.set_value(float(k.get("valor_total_R$", 0.0)))
+            self.kpi_icsap.set_value(float(k.get("icsap_pct", 0.0)))
+            self.kpi_los.set_value(float(k.get("dias_permanencia_total", 0.0))
+                                    / max(1, int(k.get("n_aihs_ou_apacs", 1)))
+                                    if k.get("n_aihs_ou_apacs", 0) > 0 else 0.0)
+            self.kpi_readm.set_value(float(k.get("readmissao_30d_est_pct", 0.0)))
+        except Exception as e:
+            print(f"\n[!!!] EXCECAO _fill_kpis: {type(e).__name__}: {str(e)}", flush=True)
+            traceback.print_exc()
+            try:
+                self.kpi_estabs.set_value(0); self.kpi_prod.set_value(0); self.kpi_valor.set_value(0.0)
+                self.kpi_icsap.set_value(0.0); self.kpi_los.set_value(0.0); self.kpi_readm.set_value(0.0)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def _fill_tab_risco(self, m: DashboardMetrics) -> None:
-        # Gráfico de estratos (médio de ALTO/MEDIO/BAIXO nos hospitais)
-        df = m.estratificacao_risco
-        if pg is not None and not df.is_empty():
-            self.plot_estratos.clear()
-            cat = ["ALTO", "MEDIO", "BAIXO"]
-            vals = []
-            for c in cat:
-                col = f"pct_{c}"
-                vals.append(float(df[col].mean()) if col in df.columns else 0.0)
-            x = list(range(len(cat)))
-            bg = pg.BarGraphItem(x=x, height=vals, width=0.35,
-                                 brushes=[_brush(_DANG), _brush(_WARN), _brush(_OK)])
-            self.plot_estratos.addItem(bg)
-            ax = self.plot_estratos.getAxis("bottom")
-            ax.setTicks([[ (i, c) for i, c in enumerate(cat) ]])
-            self.plot_estratos.setXRange(-0.8, 2.8)
-            self.plot_estratos.setYRange(0, 105)
-            self.plot_estratos.setTitle(f"Estratos — ALTO={vals[0]:.1f}%, MÉDIO={vals[1]:.1f}%, BAIXO={vals[2]:.1f}%",
-                                        color=_TXT, size="10pt")
-        # CMI
-        if pg is not None and not m.eficiencia_clinica.is_empty() and "case_mix_index" in m.eficiencia_clinica.columns:
-            self.plot_cmi.clear()
-            cmi = m.eficiencia_clinica["case_mix_index"].to_numpy()
-            cnes = m.eficiencia_clinica["cnes"].to_list()
-            y = cmi
-            x = list(range(len(y)))
-            sp = pg.ScatterPlotItem(x=x, y=list(y), size=8,
-                                    pen=_pen(_PRI_DARK), brush=_brush(_PRI))
-            self.plot_cmi.addItem(sp)
-            if len(x):
-                self.plot_cmi.getAxis("bottom").setTicks([
-                    [(x[i], (c if len(c) <= 5 else c[-5:]))
-                     for i, c in enumerate(cnes) if i % max(1, len(x)//12) == 0]
-                ])
-                self.plot_cmi.setXRange(-0.5, len(x)-0.5, padding=0)
-            # média CMI
-            avg = float(y.mean()) if len(y) else 0.0
-            ln = pg.InfiniteLine(pos=avg, angle=0, pen=_pen(_WARN, 2))
-            self.plot_cmi.addItem(ln)
-            self.plot_cmi.setTitle(f"Case Mix Index — média={avg:.2f}", color=_TXT, size="10pt")
-        # Tabela estratos
-        self._plfill(self.tbl_risco, df)
+        try:
+            # Gráfico de estratos (médio de ALTO/MEDIO/BAIXO nos hospitais)
+            df = m.estratificacao_risco
+            if pg is not None and not df.is_empty():
+                self.plot_estratos.clear()
+                cat = ["ALTO", "MEDIO", "BAIXO"]
+                vals = []
+                for c in cat:
+                    col = f"pct_{c}"
+                    vals.append(float(df[col].mean()) if col in df.columns else 0.0)
+                x = list(range(len(cat)))
+                # Garante valores 0 aparecem como barras mínimas visíveis 0.5px (corrige bug 1 barra)
+                vals_vis = [v if v > 0.0 else 0.1 for v in vals]
+                bg = pg.BarGraphItem(x=x, height=vals_vis, width=0.35,
+                                     brushes=[_brush(_DANG), _brush(_WARN), _brush(_OK)])
+                self.plot_estratos.addItem(bg)
+                ax = self.plot_estratos.getAxis("bottom")
+                ax.setTicks([[(i, c) for i, c in enumerate(cat)]])
+                self.plot_estratos.setXRange(-0.8, len(cat)-0.2)
+                self.plot_estratos.setYRange(0, max(105.0, max(vals)*1.1 if vals else 105.0))
+                self.plot_estratos.setTitle(f"Estratos — ALTO={vals[0]:.1f}%, MÉDIO={vals[1]:.1f}%, BAIXO={vals[2]:.1f}%",
+                                            color=_TXT, size="10pt")
+            # CMI
+            if pg is not None and not m.eficiencia_clinica.is_empty() and "case_mix_index" in m.eficiencia_clinica.columns:
+                self.plot_cmi.clear()
+                cmi = m.eficiencia_clinica["case_mix_index"].to_numpy()
+                cnes = m.eficiencia_clinica["cnes"].to_list()
+                y = cmi
+                x = list(range(len(y)))
+                sp = pg.ScatterPlotItem(x=x, y=list(y), size=8,
+                                        pen=_pen(_PRI_DARK), brush=_brush(_PRI))
+                self.plot_cmi.addItem(sp)
+                if len(x):
+                    self.plot_cmi.getAxis("bottom").setTicks([
+                        [(x[i], (c if len(c) <= 5 else c[-5:]))
+                         for i, c in enumerate(cnes) if i % max(1, len(x)//12) == 0]
+                    ])
+                    self.plot_cmi.setXRange(-0.5, len(x)-0.5, padding=0)
+                # média CMI
+                avg = float(y.mean()) if len(y) else 0.0
+                ln = pg.InfiniteLine(pos=avg, angle=0, pen=_pen(_WARN, 2))
+                self.plot_cmi.addItem(ln)
+                self.plot_cmi.setTitle(f"Case Mix Index — média={avg:.2f}", color=_TXT, size="10pt")
+            # Tabela estratos
+            self._plfill(self.tbl_risco, df)
+        except Exception as e:
+            print(f"\n[!!!] EXCECAO _fill_tab_risco: {type(e).__name__}: {str(e)}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     def _fill_tab_efic(self, m: DashboardMetrics) -> None:
-        df = m.eficiencia_clinica
-        if pg is not None and not df.is_empty() and "los_o_e" in df.columns:
-            self.plot_los.clear()
-            labels = df["cnes"].to_list()
-            oe = df["los_o_e"].to_numpy().tolist()
-            x = list(range(len(oe)))
-            colors = [_color_for_pct(50 if v < 1 else 50 + (v-1)*50).name() for v in oe]
-            bg = pg.BarGraphItem(x=x, height=oe, width=0.35,
-                                 brushes=[QBrush(QColor(c)) for c in colors])
-            self.plot_los.addItem(bg)
-            self.plot_los.addItem(pg.InfiniteLine(pos=1.0, angle=0, pen=_pen(_WARN, 2)))
-            if x:
-                self.plot_los.getAxis("bottom").setTicks([
-                    [(x[i], (c if len(c) <= 5 else c[-5:]))
-                     for i, c in enumerate(labels) if i % max(1, len(x)//12) == 0]
-                ])
-                self.plot_los.setXRange(-0.5, len(x)-0.5, padding=0)
-        if pg is not None and not df.is_empty() and "custo_o_e" in df.columns:
-            self.plot_custo.clear()
-            labels = df["cnes"].to_list() if "cnes" in df.columns else []
-            ce = df["custo_o_e"].to_numpy().tolist()
-            colors_c = [_color_for_pct(50 if v < 1 else 50 + (v-1)*50).name() for v in ce]
-            x = list(range(len(ce)))
-            bg = pg.BarGraphItem(x=x, height=ce, width=0.35,
-                                 brushes=[QBrush(QColor(c)) for c in colors_c])
-            self.plot_custo.addItem(bg)
-            self.plot_custo.addItem(pg.InfiniteLine(pos=1.0, angle=0, pen=_pen(_WARN, 2)))
-            if x and labels:
-                self.plot_custo.getAxis("bottom").setTicks([
-                    [(x[i], (c if len(c) <= 5 else c[-5:]))
-                     for i, c in enumerate(labels) if i % max(1, len(x)//12) == 0]
-                ])
-                self.plot_custo.setXRange(-0.5, len(x)-0.5, padding=0)
-        self._plfill(self.tbl_efic, df)
+        try:
+            df = m.eficiencia_clinica
+            if pg is not None and not df.is_empty() and "los_o_e" in df.columns:
+                self.plot_los.clear()
+                labels = df["cnes"].to_list() if "cnes" in df.columns else []
+                oe_raw = df["los_o_e"].to_numpy().tolist()
+                oe = [v if v is not None and (isinstance(v, (int,float)) and math.isfinite(v)) else 0.0 for v in oe_raw]
+                x = list(range(len(oe)))
+                def _pct_safe(v):
+                    try:
+                        return 50 if (not isinstance(v,(int,float)) or not math.isfinite(v) or v < 1) else min(100, 50 + float(v-1)*50)
+                    except Exception:
+                        return 50
+                colors = [_color_for_pct(_pct_safe(v)).name() for v in oe]
+                bg = pg.BarGraphItem(x=x, height=[v if v > 0 else 0.1 for v in oe], width=0.35,
+                                     brushes=[QBrush(QColor(c)) for c in colors])
+                self.plot_los.addItem(bg)
+                self.plot_los.addItem(pg.InfiniteLine(pos=1.0, angle=0, pen=_pen(_WARN, 2)))
+                if x and labels:
+                    self.plot_los.getAxis("bottom").setTicks([
+                        [(x[i], (c if len(c) <= 5 else c[-5:]))
+                         for i, c in enumerate(labels) if i % max(1, len(x)//12) == 0]
+                    ])
+                    self.plot_los.setXRange(-0.5, len(x)-0.5, padding=0)
+            if pg is not None and not df.is_empty() and "custo_o_e" in df.columns:
+                self.plot_custo.clear()
+                labels = df["cnes"].to_list() if "cnes" in df.columns else []
+                ce_raw = df["custo_o_e"].to_numpy().tolist()
+                ce = [v if v is not None and (isinstance(v,(int,float)) and math.isfinite(v)) else 0.0 for v in ce_raw]
+                colors_c = [_color_for_pct(_pct_safe(v)).name() for v in ce]
+                x = list(range(len(ce)))
+                bg = pg.BarGraphItem(x=x, height=[v if v > 0 else 0.1 for v in ce], width=0.35,
+                                     brushes=[QBrush(QColor(c)) for c in colors_c])
+                self.plot_custo.addItem(bg)
+                self.plot_custo.addItem(pg.InfiniteLine(pos=1.0, angle=0, pen=_pen(_WARN, 2)))
+                if x and labels:
+                    self.plot_custo.getAxis("bottom").setTicks([
+                        [(x[i], (c if len(c) <= 5 else c[-5:]))
+                         for i, c in enumerate(labels) if i % max(1, len(x)//12) == 0]
+                    ])
+                    self.plot_custo.setXRange(-0.5, len(x)-0.5, padding=0)
+            self._plfill(self.tbl_efic, df)
+        except Exception as e:
+            print(f"\n[!!!] EXCECAO _fill_tab_efic: {type(e).__name__}: {str(e)}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     def _fill_tab_terr(self, m: DashboardMetrics) -> None:
-        # ICSAP por condição
-        if pg is not None and not m.icsap_por_condicao.is_empty():
-            self.plot_icsap.clear()
-            conds = m.icsap_por_condicao["condicao_evitavel"].to_list()
-            ns = m.icsap_por_condicao["n_internacoes"].to_numpy().tolist()
-            y = list(reversed(ns)); labels = list(reversed(conds))
-            brushes = [QBrush(_color_for_pct(50 - 50*(y[i]/(max(y) if max(y) else 1)))) for i in range(len(y))]
-            bg = pg.BarGraphItem(x=list(range(len(y))), height=y, width=0.4, brushes=brushes)
-            self.plot_icsap.addItem(bg)
-            self.plot_icsap.getAxis("bottom").setTicks([
-                [(i, c if len(c) < 26 else c[:24] + "…") for i, c in enumerate(labels)]
-            ])
-            ax = self.plot_icsap.getAxis("bottom")
-            ax.setStyle(tickTextHeight=110, autoExpandTextSpace=True)
-            self.plot_icsap.setXRange(-0.5, len(y)-0.5, padding=0)
-        # Tabelas
-        self._plfill(self.tbl_terr, m.integracao_territorial)
-        if m.huff and not m.huff.hospital_attraction.is_empty():
-            self._plfill(self.tbl_huff, m.huff.hospital_attraction)
-
-        # =====================================================
-        # Mapa concêntrico + filtros de agrupamento SIGTAP
-        # =====================================================
         try:
-            from papahr.dashboard.cnes_loader import get_cnes_data
-            cnes_data = get_cnes_data().load()
-            muni_df = cnes_data.municipios
-            estab_df = cnes_data.estabelecimentos
-            self._muni_df = muni_df
-        except Exception as exc:
-            log.warning("Não foi possível carregar CNES para o mapa: %s", exc)
-            muni_df = pl.DataFrame()
-            estab_df = pl.DataFrame()
-
-        points: list[HospitalMapPoint] = []
-        target_cnes = set(self._last_cnes or [])
-        if estab_df is not None and not estab_df.is_empty() and "CO_CNES" in estab_df.columns:
-            cols = [
-                "CO_CNES", "NO_FANTASIA", "NO_RAZAO_SOCIAL",
-                "NU_LATITUDE", "NU_LONGITUDE", "NU_LEITOS_SUS",
-            ]
-            avail = [c for c in cols if c in estab_df.columns]
-            if len(avail) >= 5:
-                filt = estab_df.select(avail)
-                if target_cnes:
-                    filt = filt.filter(pl.col("CO_CNES").cast(pl.Utf8).is_in(list(target_cnes)))
-                for row in filt.to_dicts():
-                    cnes = str(row.get("CO_CNES", ""))
-                    nome = str(
-                        row.get("NO_FANTASIA") or row.get("NO_RAZAO_SOCIAL") or cnes
-                    )
+            # ICSAP por condição
+            if pg is not None and not m.icsap_por_condicao.is_empty():
+                self.plot_icsap.clear()
+                conds = m.icsap_por_condicao["condicao_evitavel"].to_list()
+                ns_raw = m.icsap_por_condicao["n_internacoes"].to_numpy().tolist()
+                ns = [v if isinstance(v,(int,float)) and math.isfinite(v) and v>0 else (0.1 if (isinstance(v,(int,float)) and v == 0) else 0.1) for v in ns_raw]
+                y = list(reversed(ns)); labels = list(reversed(conds))
+                def _cor_pct(v, m_y):
                     try:
-                        lat = float(row.get("NU_LATITUDE") or 0.0)
-                        lon = float(row.get("NU_LONGITUDE") or 0.0)
-                    except (TypeError, ValueError):
-                        continue
-                    if not lat or not lon:
-                        continue
-                    try:
-                        leitos = float(row.get("NU_LEITOS_SUS") or 50.0)
-                    except (TypeError, ValueError):
-                        leitos = 50.0
-                    points.append(HospitalMapPoint(
-                        cnes=cnes, nome=nome, latitude=lat, longitude=lon, leitos=leitos,
-                    ))
+                        base = 0 if not m_y or m_y == 0 else 50 - 50*(v/m_y)
+                        return _color_for_pct(min(100, max(0, base)))
+                    except Exception:
+                        return _color_for_pct(50)
+                m_y = max(y) if max(y) else 1
+                brushes = [QBrush(_cor_pct(y[i], m_y)) for i in range(len(y))]
+                bg = pg.BarGraphItem(x=list(range(len(y))), height=y, width=0.4, brushes=brushes)
+                self.plot_icsap.addItem(bg)
+                self.plot_icsap.getAxis("bottom").setTicks([
+                    [(i, c if len(c) < 26 else c[:24] + "…") for i, c in enumerate(labels)]
+                ])
+                ax = self.plot_icsap.getAxis("bottom")
+                ax.setStyle(tickTextHeight=110, autoExpandTextSpace=True)
+                self.plot_icsap.setXRange(-0.5, len(y)-0.5, padding=0)
+            # Tabelas
+            self._plfill(self.tbl_terr, m.integracao_territorial if m.integracao_territorial is not None else pl.DataFrame())
+            if m.huff and m.huff.hospital_attraction is not None and not m.huff.hospital_attraction.is_empty():
+                self._plfill(self.tbl_huff, m.huff.hospital_attraction)
 
-        # Ajusta o max_rate baseado nos dados
-        if points and self._last_df is not None and not self._last_df.is_empty():
-            # Estimativa rápida de faixa
+            # =====================================================
+            # Mapa concêntrico + filtros de agrupamento SIGTAP
+            # =====================================================
             try:
-                total_int = self._last_df.height
-                if muni_df is not None and "NU_POPULACAO" in muni_df.columns and not muni_df.is_empty():
-                    pop_total = float(muni_df["NU_POPULACAO"].cast(pl.Float64, strict=False).fill_null(0).sum() or 1)
-                    taxa_geral = 1000.0 * total_int / pop_total
-                    self.concentric_map.set_max_rate(max(10.0, taxa_geral * 2.5))
+                from papahr.dashboard.cnes_loader import get_cnes_data
+                cnes_data = get_cnes_data().load()
+                muni_df = cnes_data.municipios
+                estab_df = cnes_data.estabelecimentos
+                self._muni_df = muni_df
+            except Exception as exc:
+                log.warning("Não foi possível carregar CNES para o mapa: %s", exc)
+                muni_df = pl.DataFrame()
+                estab_df = pl.DataFrame()
+
+            points: list[HospitalMapPoint] = []
+            target_cnes = set(self._last_cnes or [])
+            if estab_df is not None and not estab_df.is_empty() and "CO_CNES" in estab_df.columns:
+                cols = [
+                    "CO_CNES", "NO_FANTASIA", "NO_RAZAO_SOCIAL",
+                    "NU_LATITUDE", "NU_LONGITUDE", "NU_LEITOS_SUS",
+                ]
+                avail = [c for c in cols if c in estab_df.columns]
+                if len(avail) >= 5:
+                    filt = estab_df.select(avail)
+                    if target_cnes:
+                        filt = filt.filter(pl.col("CO_CNES").cast(pl.Utf8).is_in(list(target_cnes)))
+                    for row in filt.to_dicts():
+                        cnes = str(row.get("CO_CNES", ""))
+                        nome = str(
+                            row.get("NO_FANTASIA") or row.get("NO_RAZAO_SOCIAL") or cnes
+                        )
+                        try:
+                            lat = float(row.get("NU_LATITUDE") or 0.0)
+                            lon = float(row.get("NU_LONGITUDE") or 0.0)
+                        except (TypeError, ValueError):
+                            continue
+                        if not lat or not lon:
+                            continue
+                        try:
+                            leitos = float(row.get("NU_LEITOS_SUS") or 50.0)
+                        except (TypeError, ValueError):
+                            leitos = 50.0
+                        points.append(HospitalMapPoint(
+                            cnes=cnes, nome=nome, latitude=lat, longitude=lon, leitos=leitos,
+                        ))
+
+            # Ajusta o max_rate baseado nos dados
+            if points and self._last_df is not None and not self._last_df.is_empty():
+                try:
+                    total_int = self._last_df.height
+                    if muni_df is not None and "NU_POPULACAO" in muni_df.columns and not muni_df.is_empty():
+                        pop_total = float(muni_df["NU_POPULACAO"].cast(pl.Float64, strict=False).fill_null(0).sum() or 1)
+                        taxa_geral = 1000.0 * total_int / pop_total
+                        self.concentric_map.set_max_rate(max(10.0, taxa_geral * 2.5))
+                except Exception:
+                    pass
+            try:
+                self.concentric_map.set_data(
+                    points,
+                    muni_df if (muni_df is not None and not muni_df.is_empty()) else pl.DataFrame(),
+                    self._last_df if self._last_df is not None else pl.DataFrame(),
+                )
+            except Exception as _exc_map:
+                log.warning("Falha ao renderizar mapa concêntrico: %s", _exc_map)
+
+            # Popula combos de filtro
+            self._rebuild_map_group_options()
+
+            # =====================================================
+            # Curvas de decaimento exponencial: popula combo hospital
+            # =====================================================
+            decay_df = m.distance_decay if m.distance_decay is not None else pl.DataFrame()
+            bench_df = m.benchmarking if m.benchmarking is not None else pl.DataFrame()
+            self.cbo_decay_hospital.blockSignals(True)
+            self.cbo_decay_hospital.clear()
+            if decay_df is not None and not decay_df.is_empty():
+                nome_lookup: dict[str, str] = {}
+                if bench_df is not None and not bench_df.is_empty() and "hospital_nome" in bench_df.columns:
+                    for r in bench_df.select(["hospital_cnes", "hospital_nome"]).unique(
+                            subset=["hospital_cnes"], keep="first").iter_rows(named=True):
+                        nome_lookup[str(r["hospital_cnes"])] = str(r["hospital_nome"] or "")
+                cnes_unicos: list[str] = []
+                vistos: set[str] = set()
+                for c in decay_df["hospital_cnes"].cast(pl.Utf8).to_list():
+                    if c in vistos:
+                        continue
+                    vistos.add(c); cnes_unicos.append(c)
+                for cnes in cnes_unicos:
+                    nome = nome_lookup.get(cnes, "").strip()
+                    label = f"{cnes} — {nome}" if nome else f"CNES {cnes}"
+                    self.cbo_decay_hospital.addItem(label, cnes)
+            self.cbo_decay_hospital.blockSignals(False)
+            if self.cbo_decay_hospital.count() > 0:
+                self.cbo_decay_hospital.setCurrentIndex(0)
+            else:
+                self._on_decay_hospital_changed(0)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_terr: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
+            try:
+                if pg is not None:
+                    self.plot_icsap.clear()
             except Exception:
                 pass
-        try:
-            self.concentric_map.set_data(
-                points,
-                muni_df if (muni_df is not None and not muni_df.is_empty()) else pl.DataFrame(),
-                self._last_df if self._last_df is not None else pl.DataFrame(),
-            )
-        except Exception as _exc_map:
-            log.warning("Falha ao renderizar mapa concêntrico: %s", _exc_map)
-
-        # Popula combos de filtro
-        self._rebuild_map_group_options()
-
-        # =====================================================
-        # Curvas de decaimento exponencial: popula combo hospital
-        # =====================================================
-        decay_df = m.distance_decay
-        bench_df = m.benchmarking
-        self.cbo_decay_hospital.blockSignals(True)
-        self.cbo_decay_hospital.clear()
-        if decay_df is not None and not decay_df.is_empty():
-            # nome do hospital: se bench_df tem hospital_nome usa senão usa CNES
-            nome_lookup: dict[str, str] = {}
-            if bench_df is not None and not bench_df.is_empty() and "hospital_nome" in bench_df.columns:
-                for r in bench_df.select(["hospital_cnes", "hospital_nome"]).unique(
-                        subset=["hospital_cnes"], keep="first").iter_rows(named=True):
-                    nome_lookup[str(r["hospital_cnes"])] = str(r["hospital_nome"] or "")
-            # CNES únicos presentes em decay_df (ordem original)
-            cnes_unicos: list[str] = []
-            vistos: set[str] = set()
-            for c in decay_df["hospital_cnes"].cast(pl.Utf8).to_list():
-                if c in vistos:
-                    continue
-                vistos.add(c); cnes_unicos.append(c)
-            for cnes in cnes_unicos:
-                nome = nome_lookup.get(cnes, "").strip()
-                label = f"{cnes} — {nome}" if nome else f"CNES {cnes}"
-                self.cbo_decay_hospital.addItem(label, cnes)
-        self.cbo_decay_hospital.blockSignals(False)
-        # Dispara render inicial do primeiro hospital (se tiver)
-        if self.cbo_decay_hospital.count() > 0:
-            self.cbo_decay_hospital.setCurrentIndex(0)
-        else:
-            self._on_decay_hospital_changed(0)
 
     # ------------------------------------------------------------------
     def _fill_tab_trans(self, m: DashboardMetrics) -> None:
-        df = m.transicao_cuidado
-        if pg is not None and not df.is_empty():
-            self.plot_trans.clear()
-            linhas = df["linha_cuidado"].to_list()
-            x = list(range(len(linhas)))
-            contato = df["contato_48h_pct"].to_numpy().tolist() if "contato_48h_pct" in df.columns else [0]*len(linhas)
-            readm = df["readmissao_30d_pct_est"].to_numpy().tolist() if "readmissao_30d_pct_est" in df.columns else [0]*len(linhas)
-            # Dois grupos de barras (offset esquerda/direita)
-            w = 0.38
-            bg1 = pg.BarGraphItem(x=[i-w for i in x], height=contato, width=w,
-                                  brush=_brush(_OK))
-            bg2 = pg.BarGraphItem(x=[i+w for i in x], height=readm, width=w,
-                                  brush=_brush(_DANG))
-            self.plot_trans.addItem(bg1); self.plot_trans.addItem(bg2)
-            ax = self.plot_trans.getAxis("bottom")
-            ax.setTicks([
-                [(i, (c if len(c) < 24 else c[:22] + "…")) for i, c in enumerate(linhas)]
-            ])
-            ax.setStyle(tickTextHeight=110, autoExpandTextSpace=True)
-            self.plot_trans.setXRange(-1, len(x), padding=0)
-            self.plot_trans.setYRange(0, 100)
-            legend = self.plot_trans.addLegend(offset=(20, 20), brush=None, labelTextColor=_TXT)
-            # O addLegend só adiciona itens quando há gráficos plotados com nome; workaround:
-            # usamos duas linhas pontilhadas "dummy"
-            self.plot_trans.plot([], [], pen=_pen(_OK, 6), name="Contato 48h")
-            self.plot_trans.plot([], [], pen=_pen(_DANG, 6), name="Readmissão 30d")
-            legend = self.plot_trans.getPlotItem().legend
-        self._plfill(self.tbl_trans, df)
+        try:
+            df = m.transicao_cuidado
+            if pg is not None and not df.is_empty():
+                self.plot_trans.clear()
+                linhas = df["linha_cuidado"].to_list()
+                x = list(range(len(linhas)))
+                contato_raw = df["contato_48h_pct"].to_numpy().tolist() if "contato_48h_pct" in df.columns else [0]*len(linhas)
+                readm_raw = df["readmissao_30d_pct_est"].to_numpy().tolist() if "readmissao_30d_pct_est" in df.columns else [0]*len(linhas)
+                def _vis(v):
+                    try:
+                        if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+                            return 0.1
+                        return v if v > 0 else 0.1
+                    except Exception:
+                        return 0.1
+                contato = [_vis(v) for v in contato_raw]
+                readm = [_vis(v) for v in readm_raw]
+                w = 0.38
+                bg1 = pg.BarGraphItem(x=[i-w for i in x], height=contato, width=w,
+                                      brush=_brush(_OK))
+                bg2 = pg.BarGraphItem(x=[i+w for i in x], height=readm, width=w,
+                                      brush=_brush(_DANG))
+                self.plot_trans.addItem(bg1); self.plot_trans.addItem(bg2)
+                ax = self.plot_trans.getAxis("bottom")
+                ax.setTicks([
+                    [(i, (c if len(c) < 24 else c[:22] + "…")) for i, c in enumerate(linhas)]
+                ])
+                ax.setStyle(tickTextHeight=110, autoExpandTextSpace=True)
+                self.plot_trans.setXRange(-1, len(x), padding=0)
+                self.plot_trans.setYRange(0, max(105.0, max(contato + readm) * 1.1 if (contato or readm) else 105.0))
+                legend = self.plot_trans.addLegend(offset=(20, 20), brush=None, labelTextColor=_TXT)
+                self.plot_trans.plot([], [], pen=_pen(_OK, 6), name="Contato 48h")
+                self.plot_trans.plot([], [], pen=_pen(_DANG, 6), name="Readmissão 30d")
+                legend = self.plot_trans.getPlotItem().legend
+            self._plfill(self.tbl_trans, df if df is not None else pl.DataFrame())
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_trans: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
+            try:
+                if pg is not None:
+                    self.plot_trans.clear()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def _fill_tab_geral(self, m: DashboardMetrics) -> None:
-        ts = m.serie_temporal
-        if pg is not None and not ts.is_empty() and ts.width >= 3:
-            self.plot_ts.clear()
-            cols = ts.columns
-            label_x = f"{cols[0]}-{cols[1]}" if len(cols) >= 2 else ""
-            n = ts["n_internacoes"].to_numpy().tolist()
-            x = list(range(len(n)))
-            # Labels bottom (col1-col2 concat)
-            try:
-                k1, k2 = cols[0], cols[1]
-                labels = [f"{int(a)}-{int(b):02d}" for a, b in zip(ts[k1].to_list(), ts[k2].to_list())]
-            except (TypeError, ValueError):
-                labels = [str(i) for i in x]
-            bg = pg.BarGraphItem(x=x, height=n, width=0.4, brush=_brush(_PRI))
-            self.plot_ts.addItem(bg)
-            if "taxa_icsap_pct" in ts.columns:
-                y2 = ts["taxa_icsap_pct"].to_numpy().tolist()
-                if y2 and max(y2) > 0:
-                    # escala 0-100 em eixo 2
-                    # (simples: escalona y2 para intervalo do mesmo gráfico usando eixo 2)
+        try:
+            ts = m.serie_temporal
+            if pg is not None and not ts.is_empty() and ts.width >= 3:
+                self.plot_ts.clear()
+                cols = ts.columns
+                n_raw = ts["n_internacoes"].to_numpy().tolist() if "n_internacoes" in cols else []
+                def _vis(v):
                     try:
-                        self.plot_ts.showAxis("right")
-                        self.plot_ts.getAxis("right").setPen(_pen(_WARN))
-                        self.plot_ts.getAxis("right").setTextPen(_WARN)
-                        self.plot_ts.setYRange(0, max(100.0, float(max(n) or 0) * 1.1), padding=0.0)
-                        # Segundo plotitem com viewbox secundário? Simples aqui: usar escala normalizada
-                        # Simplificação: plotar normalizado em % do max de n
-                        mx = max(n) if n else 1
-                        y2_sc = [(y / 100.0) * mx for y in y2]
-                        self.plot_ts.plot(x, y2_sc, pen=_pen(_WARN, 2), name="Taxa ICSAP (%)")
+                        if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+                            return 0.1
+                        return v if v > 0 else 0.1
                     except Exception:
-                        pass
-            if x and labels:
-                self.plot_ts.getAxis("bottom").setTicks([
-                    [(x[i], c) for i, c in enumerate(labels) if i % max(1, len(x)//10) == 0]
-                ])
-                self.plot_ts.setXRange(-0.5, len(x)-0.5, padding=0)
-        # Alertas
-        if m.alerts:
-            df_alerts = pl.DataFrame({"#": list(range(1, len(m.alerts)+1)),
-                                       "Alerta Operacional": m.alerts})
-        else:
-            df_alerts = pl.DataFrame({"#": ["1"], "Alerta Operacional": ["Nenhum alerta. Todos os indicadores dentro dos limites recomendados."]})
-        self._plfill(self.tbl_alerts, df_alerts)
-        # Top 10
-        self._plfill(self.tbl_top10_p, m.top10_procedimentos)
-        self._plfill(self.tbl_top10_e, m.top10_especialidades)
+                        return 0.1
+                n = [_vis(v) for v in n_raw]
+                x = list(range(len(n)))
+                try:
+                    k1, k2 = cols[0], cols[1]
+                    labels = [f"{int(a)}-{int(b):02d}" for a, b in zip(ts[k1].to_list(), ts[k2].to_list())]
+                except (TypeError, ValueError, Exception):
+                    labels = [str(i) for i in x]
+                bg = pg.BarGraphItem(x=x, height=n, width=0.4, brush=_brush(_PRI))
+                self.plot_ts.addItem(bg)
+                if "taxa_icsap_pct" in ts.columns:
+                    y2_raw = ts["taxa_icsap_pct"].to_numpy().tolist()
+                    y2 = []
+                    for v in y2_raw:
+                        try:
+                            y2.append(float(v) if v is not None and math.isfinite(float(v)) else 0.0)
+                        except Exception:
+                            y2.append(0.0)
+                    if y2:
+                        try:
+                            self.plot_ts.showAxis("right")
+                            self.plot_ts.getAxis("right").setPen(_pen(_WARN))
+                            self.plot_ts.getAxis("right").setTextPen(_WARN)
+                            mx_n = max(n) if n else 1
+                            self.plot_ts.setYRange(0, max(100.0, mx_n * 1.1), padding=0.0)
+                            y2_sc = [(y / 100.0) * mx_n for y in y2]
+                            self.plot_ts.plot(x, y2_sc, pen=_pen(_WARN, 2), name="Taxa ICSAP (%)")
+                        except Exception:
+                            pass
+                if x and labels:
+                    self.plot_ts.getAxis("bottom").setTicks([
+                        [(x[i], c) for i, c in enumerate(labels) if i % max(1, len(x)//10) == 0]
+                    ])
+                    self.plot_ts.setXRange(-0.5, len(x)-0.5, padding=0)
+            if m.alerts:
+                df_alerts = pl.DataFrame({"#": list(range(1, len(m.alerts)+1)),
+                                           "Alerta Operacional": m.alerts})
+            else:
+                df_alerts = pl.DataFrame({"#": ["1"], "Alerta Operacional": ["Nenhum alerta. Todos os indicadores dentro dos limites recomendados."]})
+            self._plfill(self.tbl_alerts, df_alerts)
+            self._plfill(self.tbl_top10_p, m.top10_procedimentos if m.top10_procedimentos is not None else pl.DataFrame())
+            self._plfill(self.tbl_top10_e, m.top10_especialidades if m.top10_especialidades is not None else pl.DataFrame())
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_geral: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
+            try:
+                if pg is not None:
+                    self.plot_ts.clear()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Slots mapa concêntrico e filtros de agrupamento SIGTAP
@@ -1405,204 +1475,212 @@ class DashboardPage(QWidget):
     # Glosas e Não Pagamentos (preenchimento da aba)
     # ------------------------------------------------------------------
     def _fill_tab_glosas(self, m: DashboardMetrics) -> None:
-        """Popula KPIs, 2 gráficos e 2 tabelas de glosas."""
-        causas_df = m.glosas_causas
-        serie_df = m.glosas_serie_temporal
-        kpi_total = m.kpis.get("n_aihs_ou_apacs", 0.0) or 0.0
+        try:
+            """Popula KPIs, 2 gráficos e 2 tabelas de glosas."""
+            causas_df = m.glosas_causas if m.glosas_causas is not None else pl.DataFrame()
+            serie_df = m.glosas_serie_temporal if m.glosas_serie_temporal is not None else pl.DataFrame()
+            kpi_total = m.kpis.get("n_aihs_ou_apacs", 0.0) or 0.0
 
-        # ---- KPIs rápidos (4 cards) ----
-        if causas_df.is_empty() and serie_df.is_empty():
-            self.kpi_glosas_n.set_value(0)
-            self.kpi_glosas_pct.set_value(0.0)
-            self.kpi_glosas_val.set_value(0.0)
-            self.kpi_glosas_top.set_value("Sem dados de glosa no dataset")
-            if pg is not None:
-                self.plot_glosas_causas.clear(); self.plot_glosas_serie.clear()
-            self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Informação": [
-                "Nenhuma coluna de glosa foi detectada no dataset carregado.",
-                "Colunas procuradas: VL_GLOSA_PARCIAL, VL_GLOSA_TOTAL, QT_GLOSA_*, CO_GLOSA1..5,",
-                "  MOTIVO_GLOSA, COMPETÊNCIA, ANO/MÊS, DATAS de internação/alta.",
-                "Solução: use arquivos SIH-RD, SIH-RJ ou SIA-PA do DATASUS que contenham essas colunas de auditoria/glosa."
-            ]}))
-            self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Informação": [
-                "Série histórica indisponível — faltam colunas de competência/ano/mês ou de glosa."
-            ]}))
-            return
+            # ---- KPIs rápidos (4 cards) ----
+            if causas_df.is_empty() and serie_df.is_empty():
+                self.kpi_glosas_n.set_value(0)
+                self.kpi_glosas_pct.set_value(0.0)
+                self.kpi_glosas_val.set_value(0.0)
+                self.kpi_glosas_top.set_value("Sem dados de glosa no dataset")
+                if pg is not None:
+                    self.plot_glosas_causas.clear(); self.plot_glosas_serie.clear()
+                self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Informação": [
+                    "Nenhuma coluna de glosa foi detectada no dataset carregado.",
+                    "Colunas procuradas: VL_GLOSA_PARCIAL, VL_GLOSA_TOTAL, QT_GLOSA_*, CO_GLOSA1..5,",
+                    "  MOTIVO_GLOSA, COMPETÊNCIA, ANO/MÊS, DATAS de internação/alta.",
+                    "Solução: use arquivos SIH-RD, SIH-RJ ou SIA-PA do DATASUS que contenham essas colunas de auditoria/glosa."
+                ]}))
+                self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Informação": [
+                    "Série histórica indisponível — faltam colunas de competência/ano/mês ou de glosa."
+                ]}))
+                return
 
-        # --- Agregados globais para KPI ---
-        n_glosas: int = 0
-        pct_glosas: float = 0.0
-        valor_glosado: float = 0.0
-        top_causa: str = "—"
-        if not serie_df.is_empty():
-            col_n_tot = "N total AIHs/APACs"
-            col_n_gl = "N glosadas"
-            col_vl_gl = "Valor glosado (R$)"
-            if col_n_tot in serie_df.columns and col_n_gl in serie_df.columns:
-                n_total = int(serie_df[col_n_tot].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
-                n_glosas = int(serie_df[col_n_gl].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
-                if kpi_total > 0:
-                    pct_glosas = 100.0 * n_glosas / float(kpi_total)
-                elif n_total > 0:
-                    pct_glosas = 100.0 * n_glosas / float(n_total)
-            if col_vl_gl in serie_df.columns:
-                valor_glosado = float(serie_df[col_vl_gl].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
-        if not causas_df.is_empty():
-            col_causa = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
-            col_n = "Nº AIHs/APACs afetadas"
-            if col_causa in causas_df.columns and col_n in causas_df.columns:
-                linha0 = causas_df.select([col_causa, col_n]).sort(col_n, descending=True).head(1)
-                if linha0.height:
-                    top_causa_val = str(linha0[col_causa][0] or "").strip()
-                    if not top_causa_val and "Código Glosa" in causas_df.columns:
-                        top_causa_val = str(causas_df["Código Glosa"][0] or "")
-                    if len(top_causa_val) > 60:
-                        top_causa_val = top_causa_val[:57] + "…"
-                    top_causa = top_causa_val or "—"
-            # Se série_df não existir mas causas sim, calcular KPI por causas
-            if n_glosas == 0 and ("Nº AIHs/APACs afetadas" in causas_df.columns):
-                n_glosas = int(causas_df["Nº AIHs/APACs afetadas"].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
-                if kpi_total > 0:
-                    pct_glosas = 100.0 * n_glosas / float(kpi_total)
-            if valor_glosado == 0 and ("Valor total glosado (R$)" in causas_df.columns):
-                valor_glosado = float(causas_df["Valor total glosado (R$)"].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
-        self.kpi_glosas_n.set_value(n_glosas)
-        self.kpi_glosas_pct.set_value(pct_glosas)
-        self.kpi_glosas_val.set_value(valor_glosado)
-        self.kpi_glosas_top.set_value(top_causa)
-
-        # ---- Gráfico 1: Top causas de glosa (barras horizontais/verticais ordenadas) ----
-        if pg is not None:
-            self.plot_glosas_causas.clear()
-            if not causas_df.is_empty():
-                col_n = "Nº AIHs/APACs afetadas"
-                col_pct = "% sobre todas as glosas"
-                col_lbl = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
-                if col_n in causas_df.columns and col_lbl in causas_df.columns:
-                    top = causas_df.sort(col_n, descending=True).head(15)
-                    top = top.reverse()  # barras menores em baixo; top N com ordenação invertida -> primeira em cima
-                    vals = top[col_n].cast(pl.Float64, strict=False).fill_null(0).to_list()
-                    labels_full = top[col_lbl].to_list()
-                    # Se col_pct existir → cor por % (maior = mais vermelho)
-                    pcts = top[col_pct].cast(pl.Float64, strict=False).fill_null(0).to_list() if col_pct in top.columns else vals
-                    x = list(range(len(vals)))
-                    brushes_list = []
-                    max_p = max((p for p in pcts if p is not None and math.isfinite(float(p))), default=1.0) or 1.0
-                    for i, p in enumerate(pcts):
-                        t = min(1.0, (float(p) if p is not None and math.isfinite(float(p)) else 0.0) / max_p) if max_p > 0 else 0.0
-                        color = _lerp_color(_OK, _DANG, t)
-                        brushes_list.append(QBrush(color))
-                    bg = pg.BarGraphItem(x=x, height=vals, width=0.4, brushes=brushes_list)
-                    self.plot_glosas_causas.addItem(bg)
-                    # Ticks: rótulos curtos
-                    def _label_curto(s: str, lim: int = 22) -> str:
-                        ss = str(s or "").strip()
-                        return ss if len(ss) <= lim else ss[:lim-1] + "…"
-                    ticks = [(i, _label_curto(labels_full[i])) for i in range(len(labels_full))]
-                    self.plot_glosas_causas.getAxis("bottom").setTicks([ticks])
-                    self.plot_glosas_causas.getAxis("bottom").setStyle(tickTextHeight=110, autoExpandTextSpace=True)
-                    self.plot_glosas_causas.setXRange(-0.5, len(x)-0.5 if x else 0.5, padding=0)
-                    if vals:
-                        mx = max((v for v in vals if v is not None and math.isfinite(float(v))), default=1.0) or 1.0
-                        self.plot_glosas_causas.setYRange(0, float(mx) * 1.18, padding=0)
-                    titulo = f"Top {len(vals)} causas de glosa | total glosadas = {n_glosas:,}"
-                    self.plot_glosas_causas.setTitle(titulo, color=_TXT, size="10pt")
-
-            # ---- Gráfico 2: Série temporal - barras (N glosadas) + linha (% valor glosado) ----
-            self.plot_glosas_serie.clear()
+            # --- Agregados globais para KPI ---
+            n_glosas: int = 0
+            pct_glosas: float = 0.0
+            valor_glosado: float = 0.0
+            top_causa: str = "—"
             if not serie_df.is_empty():
-                col_x_candidates = [
-                    ["Competência (AAAAMM)"],
-                    ["Ano", "Mês"],
-                ]
-                x_labels: list[str] = []
-                xs: list[int] = []
+                col_n_tot = "N total AIHs/APACs"
                 col_n_gl = "N glosadas"
-                col_pct_vl = "% valor glosado $"
                 col_vl_gl = "Valor glosado (R$)"
-                heights_bar: list[float] = []
-                line_vals: list[float] = []
-                rows = serie_df.to_dicts()
-                for idx, r in enumerate(rows):
-                    xs.append(idx)
-                    # label do eixo
-                    if "Competência (AAAAMM)" in serie_df.columns:
-                        x_labels.append(str(r.get("Competência (AAAAMM)") or ""))
-                    elif "Ano" in serie_df.columns and "Mês" in serie_df.columns:
-                        a = r.get("Ano"); m = r.get("Mês")
-                        try:
-                            x_labels.append(f"{int(a)}-{int(m):02d}")
-                        except (TypeError, ValueError):
-                            x_labels.append(str(idx))
-                    else:
-                        x_labels.append(str(idx))
-                    heights_bar.append(float(r.get(col_n_gl) or 0.0) if col_n_gl in serie_df.columns else 0.0)
-                    pct_v = r.get(col_pct_vl) if col_pct_vl in serie_df.columns else None
-                    if pct_v is not None and math.isfinite(float(pct_v)):
-                        line_vals.append(float(pct_v))
-                    else:
-                        # fallback: valor_glosado apresentado normalizado em % do max valor
-                        line_vals.append(float(r.get(col_vl_gl) or 0.0) if col_vl_gl in serie_df.columns else 0.0)
-                # Barras
-                if heights_bar:
-                    bg_serie = pg.BarGraphItem(x=xs, height=heights_bar, width=0.35, brush=_brush(_DANG))
-                    self.plot_glosas_serie.addItem(bg_serie)
-                # Linha amarela (eixo 2 simplificado): normaliza para 0..max(heights_bar)*1.12
-                if line_vals and any(math.isfinite(v) and v > 0 for v in line_vals):
-                    is_pct = (col_pct_vl in serie_df.columns)
-                    if is_pct:
-                        # escala % 0..~100 → normaliza para range do gráfico de barras (se barras não zero)
-                        max_bar = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
-                        max_line = max((v for v in line_vals if math.isfinite(v)), default=1.0) or 1.0
-                        sc = (max_bar / 100.0) if max_line <= 101 else (max_bar / max_line)
-                        line_scaled = [v * sc for v in line_vals]
-                    else:
-                        line_scaled = line_vals
-                    # plota linha amarela grossa
-                    self.plot_glosas_serie.plot(xs, line_scaled, pen=_pen(_WARN, 3), name="% valor glosado $")
-                    try:
-                        self.plot_glosas_serie.showAxis("right")
-                        self.plot_glosas_serie.getAxis("right").setPen(_pen(_WARN))
-                        self.plot_glosas_serie.getAxis("right").setTextPen(_WARN)
-                        self.plot_glosas_serie.getAxis("right").setLabel(
-                            "% valor glosado ($)" if is_pct else "Valor glosado R$",
-                            color=_WARN)
-                        # escala eixo direito: mapeia 0..max_scaled → 0..max_original
-                        max_sc = max(line_scaled) if line_scaled else 1.0
-                        max_orig = max(line_vals) if line_vals else 1.0
-                        ratio = (max_orig / max_sc) if max_sc > 0 else 1.0
-                        self.plot_glosas_serie.getAxis("right").setScale(ratio)
-                    except Exception:
-                        pass
-                # Ticks
-                if x_labels and xs:
-                    passo = max(1, len(xs)//14)
-                    ticks_s = [(xs[i], x_labels[i]) for i in range(0, len(xs), passo)]
-                    self.plot_glosas_serie.getAxis("bottom").setTicks([ticks_s])
-                    self.plot_glosas_serie.getAxis("bottom").setStyle(tickTextHeight=90, autoExpandTextSpace=True)
-                    self.plot_glosas_serie.setXRange(-0.5, xs[-1]+0.5, padding=0)
-                if heights_bar:
-                    mx = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
-                    self.plot_glosas_serie.setYRange(0, float(mx) * 1.25, padding=0)
-                self.plot_glosas_serie.setTitle(
-                    f"Série histórica — {len(rows)} períodos (competência/ano-mês)",
-                    color=_TXT, size="10pt")
+                if col_n_tot in serie_df.columns and col_n_gl in serie_df.columns:
+                    n_total = int(serie_df[col_n_tot].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
+                    n_glosas = int(serie_df[col_n_gl].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
+                    if kpi_total > 0:
+                        pct_glosas = 100.0 * n_glosas / float(kpi_total)
+                    elif n_total > 0:
+                        pct_glosas = 100.0 * n_glosas / float(n_total)
+                if col_vl_gl in serie_df.columns:
+                    valor_glosado = float(serie_df[col_vl_gl].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
+            if not causas_df.is_empty():
+                col_causa = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
+                col_n = "Nº AIHs/APACs afetadas"
+                if col_causa in causas_df.columns and col_n in causas_df.columns:
+                    linha0 = causas_df.select([col_causa, col_n]).sort(col_n, descending=True).head(1)
+                    if linha0.height:
+                        top_causa_val = str(linha0[col_causa][0] or "").strip()
+                        if not top_causa_val and "Código Glosa" in causas_df.columns:
+                            top_causa_val = str(causas_df["Código Glosa"][0] or "")
+                        if len(top_causa_val) > 60:
+                            top_causa_val = top_causa_val[:57] + "…"
+                        top_causa = top_causa_val or "—"
+                if n_glosas == 0 and ("Nº AIHs/APACs afetadas" in causas_df.columns):
+                    n_glosas = int(causas_df["Nº AIHs/APACs afetadas"].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
+                    if kpi_total > 0:
+                        pct_glosas = 100.0 * n_glosas / float(kpi_total)
+                if valor_glosado == 0 and ("Valor total glosado (R$)" in causas_df.columns):
+                    valor_glosado = float(causas_df["Valor total glosado (R$)"].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
+            self.kpi_glosas_n.set_value(n_glosas)
+            self.kpi_glosas_pct.set_value(pct_glosas)
+            self.kpi_glosas_val.set_value(valor_glosado)
+            self.kpi_glosas_top.set_value(top_causa)
 
-        # ---- Tabelas ----
-        if not causas_df.is_empty():
-            self._plfill(self.tbl_glosas_causas, causas_df)
-        else:
-            self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Observação": [
-                "Sem causas detalhadas de glosa no dataset.",
-                "Solução: use SIA/SIH com colunas CO_GLOSA1..CO_GLOSA5 ou MOTIVO_GLOSA."
-            ]}))
-        if not serie_df.is_empty():
-            self._plfill(self.tbl_glosas_serie, serie_df)
-        else:
-            self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Observação": [
-                "Sem série temporal de glosas. Faltam colunas de competência/ano/mês ou data.",
-                "Solução: arquivos DATASUS com coluna COMPETÊNCIA ou ANO/MÊS ou DT_INTERNACAO."
-            ]}))
+            def _vis(v):
+                try:
+                    if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+                        return 0.1
+                    return v if v > 0 else 0.1
+                except Exception:
+                    return 0.1
+
+            # ---- Gráfico 1: Top causas de glosa ----
+            if pg is not None:
+                self.plot_glosas_causas.clear()
+                if not causas_df.is_empty():
+                    col_n = "Nº AIHs/APACs afetadas"
+                    col_pct = "% sobre todas as glosas"
+                    col_lbl = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
+                    if col_n in causas_df.columns and col_lbl in causas_df.columns:
+                        top = causas_df.sort(col_n, descending=True).head(15)
+                        top = top.reverse()
+                        vals_raw = top[col_n].cast(pl.Float64, strict=False).fill_null(0).to_list()
+                        vals = [_vis(v) for v in vals_raw]
+                        labels_full = top[col_lbl].to_list()
+                        pcts = top[col_pct].cast(pl.Float64, strict=False).fill_null(0).to_list() if col_pct in top.columns else vals
+                        x = list(range(len(vals)))
+                        brushes_list = []
+                        max_p = max((p for p in pcts if p is not None and math.isfinite(float(p))), default=1.0) or 1.0
+                        for i, p in enumerate(pcts):
+                            t = min(1.0, (float(p) if p is not None and math.isfinite(float(p)) else 0.0) / max_p) if max_p > 0 else 0.0
+                            color = _lerp_color(_OK, _DANG, t)
+                            brushes_list.append(QBrush(color))
+                        bg = pg.BarGraphItem(x=x, height=vals, width=0.4, brushes=brushes_list)
+                        self.plot_glosas_causas.addItem(bg)
+                        def _label_curto(s: str, lim: int = 22) -> str:
+                            ss = str(s or "").strip()
+                            return ss if len(ss) <= lim else ss[:lim-1] + "…"
+                        ticks = [(i, _label_curto(labels_full[i])) for i in range(len(labels_full))]
+                        self.plot_glosas_causas.getAxis("bottom").setTicks([ticks])
+                        self.plot_glosas_causas.getAxis("bottom").setStyle(tickTextHeight=110, autoExpandTextSpace=True)
+                        self.plot_glosas_causas.setXRange(-0.5, len(x)-0.5 if x else 0.5, padding=0)
+                        if vals:
+                            mx = max((v for v in vals if v is not None and math.isfinite(float(v))), default=1.0) or 1.0
+                            self.plot_glosas_causas.setYRange(0, max(105.0, float(mx) * 1.18), padding=0)
+                        titulo = f"Top {len(vals)} causas de glosa | total glosadas = {n_glosas:,}"
+                        self.plot_glosas_causas.setTitle(titulo, color=_TXT, size="10pt")
+
+                # ---- Gráfico 2: Série temporal ----
+                self.plot_glosas_serie.clear()
+                if not serie_df.is_empty():
+                    x_labels: list[str] = []
+                    xs: list[int] = []
+                    col_n_gl = "N glosadas"
+                    col_pct_vl = "% valor glosado $"
+                    col_vl_gl = "Valor glosado (R$)"
+                    heights_bar_raw: list[float] = []
+                    line_vals: list[float] = []
+                    rows = serie_df.to_dicts()
+                    for idx, r in enumerate(rows):
+                        xs.append(idx)
+                        if "Competência (AAAAMM)" in serie_df.columns:
+                            x_labels.append(str(r.get("Competência (AAAAMM)") or ""))
+                        elif "Ano" in serie_df.columns and "Mês" in serie_df.columns:
+                            a = r.get("Ano"); _m = r.get("Mês")
+                            try:
+                                x_labels.append(f"{int(a)}-{int(_m):02d}")
+                            except (TypeError, ValueError):
+                                x_labels.append(str(idx))
+                        else:
+                            x_labels.append(str(idx))
+                        heights_bar_raw.append(float(r.get(col_n_gl) or 0.0) if col_n_gl in serie_df.columns else 0.0)
+                        pct_v = r.get(col_pct_vl) if col_pct_vl in serie_df.columns else None
+                        if pct_v is not None and math.isfinite(float(pct_v)):
+                            line_vals.append(float(pct_v))
+                        else:
+                            line_vals.append(float(r.get(col_vl_gl) or 0.0) if col_vl_gl in serie_df.columns else 0.0)
+                    heights_bar = [_vis(v) for v in heights_bar_raw]
+                    if heights_bar:
+                        bg_serie = pg.BarGraphItem(x=xs, height=heights_bar, width=0.35, brush=_brush(_DANG))
+                        self.plot_glosas_serie.addItem(bg_serie)
+                    if line_vals and any(math.isfinite(v) and v > 0 for v in line_vals):
+                        is_pct = (col_pct_vl in serie_df.columns)
+                        if is_pct:
+                            max_bar = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
+                            max_line = max((v for v in line_vals if math.isfinite(v)), default=1.0) or 1.0
+                            sc = (max_bar / 100.0) if max_line <= 101 else (max_bar / max_line)
+                            line_scaled = [v * sc for v in line_vals]
+                        else:
+                            line_scaled = line_vals
+                        self.plot_glosas_serie.plot(xs, line_scaled, pen=_pen(_WARN, 3), name="% valor glosado $")
+                        try:
+                            self.plot_glosas_serie.showAxis("right")
+                            self.plot_glosas_serie.getAxis("right").setPen(_pen(_WARN))
+                            self.plot_glosas_serie.getAxis("right").setTextPen(_WARN)
+                            self.plot_glosas_serie.getAxis("right").setLabel(
+                                "% valor glosado ($)" if is_pct else "Valor glosado R$",
+                                color=_WARN)
+                            max_sc = max(line_scaled) if line_scaled else 1.0
+                            max_orig = max(line_vals) if line_vals else 1.0
+                            ratio = (max_orig / max_sc) if max_sc > 0 else 1.0
+                            self.plot_glosas_serie.getAxis("right").setScale(ratio)
+                        except Exception:
+                            pass
+                    if x_labels and xs:
+                        passo = max(1, len(xs)//14)
+                        ticks_s = [(xs[i], x_labels[i]) for i in range(0, len(xs), passo)]
+                        self.plot_glosas_serie.getAxis("bottom").setTicks([ticks_s])
+                        self.plot_glosas_serie.getAxis("bottom").setStyle(tickTextHeight=90, autoExpandTextSpace=True)
+                        self.plot_glosas_serie.setXRange(-0.5, xs[-1]+0.5, padding=0)
+                    if heights_bar:
+                        mx = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
+                        self.plot_glosas_serie.setYRange(0, max(105.0, float(mx) * 1.25), padding=0)
+                    self.plot_glosas_serie.setTitle(
+                        f"Série histórica — {len(rows)} períodos (competência/ano-mês)",
+                        color=_TXT, size="10pt")
+
+            # ---- Tabelas ----
+            if not causas_df.is_empty():
+                self._plfill(self.tbl_glosas_causas, causas_df)
+            else:
+                self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Observação": [
+                    "Sem causas detalhadas de glosa no dataset.",
+                    "Solução: use SIA/SIH com colunas CO_GLOSA1..CO_GLOSA5 ou MOTIVO_GLOSA."
+                ]}))
+            if not serie_df.is_empty():
+                self._plfill(self.tbl_glosas_serie, serie_df)
+            else:
+                self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Observação": [
+                    "Sem série temporal de glosas. Faltam colunas de competência/ano/mês ou data.",
+                    "Solução: arquivos DATASUS com coluna COMPETÊNCIA ou ANO/MÊS ou DT_INTERNACAO."
+                ]}))
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_glosas: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
+            try:
+                self.kpi_glosas_n.set_value(0)
+                self.kpi_glosas_pct.set_value(0.0)
+                self.kpi_glosas_val.set_value(0.0)
+                self.kpi_glosas_top.set_value("Erro ao carregar glosas")
+                if pg is not None:
+                    self.plot_glosas_causas.clear(); self.plot_glosas_serie.clear()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Benchmarking Hospitalar
@@ -1613,249 +1691,274 @@ class DashboardPage(QWidget):
     }
 
     def _fill_tab_bench(self, m: DashboardMetrics) -> None:
-        """Popula o combo de hospitais e dispara a renderização inicial."""
-        df = m.benchmarking
-        self.cbo_bench_hospital.blockSignals(True)
-        self.cbo_bench_hospital.clear()
-        if df is not None and not df.is_empty():
-            # Garante colunas
-            cols = df.columns
-            col_c = "hospital_cnes"
-            col_n = "hospital_nome" if "hospital_nome" in cols else col_c
-            for r in df.select([col_c, col_n]).iter_rows(named=True):
-                cnes = str(r[col_c] or "")
-                nome = str(r.get(col_n, "") or "").strip()
-                if not cnes:
-                    continue
-                label = f"{nome}" if nome else f"CNES {cnes}"
-                if nome and cnes not in nome:
-                    label = f"{cnes} — {nome}"
-                self.cbo_bench_hospital.addItem(label, cnes)
-        self.cbo_bench_hospital.blockSignals(False)
-        if self.cbo_bench_hospital.count() > 0:
-            target_idx = 0
-            if getattr(m, "cnes_sel", None):
-                target_cnes = {str(c).strip().zfill(7) for c in m.cnes_sel if c}
-                for idx in range(self.cbo_bench_hospital.count()):
-                    c_val = str(self.cbo_bench_hospital.itemData(idx) or "").strip().zfill(7)
-                    if c_val in target_cnes:
-                        target_idx = idx
-                        break
-            self.cbo_bench_hospital.setCurrentIndex(target_idx)
-            self._on_bench_changed(target_idx)
-        else:
-            self._on_bench_changed(0)
+        try:
+            """Popula o combo de hospitais e dispara a renderização inicial."""
+            df = m.benchmarking if m.benchmarking is not None else pl.DataFrame()
+            self.cbo_bench_hospital.blockSignals(True)
+            self.cbo_bench_hospital.clear()
+            if df is not None and not df.is_empty():
+                cols = df.columns
+                col_c = "hospital_cnes"
+                col_n = "hospital_nome" if "hospital_nome" in cols else col_c
+                for r in df.select([col_c, col_n]).iter_rows(named=True):
+                    cnes = str(r[col_c] or "")
+                    nome = str(r.get(col_n, "") or "").strip()
+                    if not cnes:
+                        continue
+                    label = f"{nome}" if nome else f"CNES {cnes}"
+                    if nome and cnes not in nome:
+                        label = f"{cnes} — {nome}"
+                    self.cbo_bench_hospital.addItem(label, cnes)
+            self.cbo_bench_hospital.blockSignals(False)
+            if self.cbo_bench_hospital.count() > 0:
+                target_idx = 0
+                if getattr(m, "cnes_sel", None):
+                    target_cnes = {str(c).strip().zfill(7) for c in m.cnes_sel if c}
+                    for idx in range(self.cbo_bench_hospital.count()):
+                        c_val = str(self.cbo_bench_hospital.itemData(idx) or "").strip().zfill(7)
+                        if c_val in target_cnes:
+                            target_idx = idx
+                            break
+                self.cbo_bench_hospital.setCurrentIndex(target_idx)
+                self._on_bench_changed(target_idx)
+            else:
+                self._on_bench_changed(0)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_bench: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
+            try:
+                self.cbo_bench_hospital.blockSignals(False)
+            except Exception:
+                pass
 
     def _on_bench_changed(self, _idx: int = 0) -> None:
-        """Atualiza os gráficos e tabela de benchmarking conforme seleção."""
-        m = self._metrics
-        if m is None or m.benchmarking.is_empty():
-            self.lbl_bench_summary.setText(
-                "Hospital: ——   Nível geográfico: ——   Comparando com —— hospitais (sem benchmarking no momento).")
-            if pg is not None:
-                self.plot_bench_bar.clear(); self.plot_bench_scatter.clear()
-            self._plfill(self.tbl_bench, pl.DataFrame({"Info": [
-                "Nenhum dado de benchmarking disponível. Rode um pipeline com dados CNES/SIA/SIH carregado."]}))
-            return
-        df = m.benchmarking
-        alvo_cnes = self.cbo_bench_hospital.currentData()
-        nivel_chave = self.cbo_bench_level.currentData() or "nivel_uf"
-        ind = self.cbo_bench_ind.currentData() or "icsap_pct"
-        nivel_label = dict(
-            (self.cbo_bench_level.itemText(i), self.cbo_bench_level.itemText(i))
-            for i in range(self.cbo_bench_level.count())
-        ).get(
-            self.cbo_bench_level.itemText(self.cbo_bench_level.currentIndex()),
-            nivel_chave,
-        )
-        # --- Acha a linha do hospital alvo
-        linha_alvo = df.filter(pl.col("hospital_cnes") == str(alvo_cnes))
-        if linha_alvo.is_empty():
-            self.lbl_bench_summary.setText(
-                f"Hospital não encontrado no conjunto; {df.height} hospitais totais.")
-            return
-        alvo_chave = str(linha_alvo[nivel_chave][0] or "")
-        if alvo_chave:
-            df_comp = df.filter(pl.col(nivel_chave) == alvo_chave)
-        else:
-            df_comp = df.clone()
-        # Remove linhas onde o indicador não existe
-        if ind in df_comp.columns:
-            df_comp = df_comp.filter(pl.col(ind).is_not_null())
-        n_comp = df_comp.height
-        if n_comp == 0:
-            self.lbl_bench_summary.setText(
-                f"Hospital: ——   Nível geográfico: {nivel_label}   Nenhum hospital com dados para o indicador selecionado.")
-            return
-        # Ordena pelo indicador (decrescente se MAIS_ALTO_PIOR para colocar os piores primeiro)
-        sort_desc = ind in self._INDICADOR_PIOR_ALTO
-        df_sorted = df_comp.sort(by=ind, descending=sort_desc)
-        # Encontra a posição do alvo no dataframe ordenado
-        alvo_i = None
-        ordered_cnes = df_sorted["hospital_cnes"].to_list()
         try:
-            alvo_i = ordered_cnes.index(str(alvo_cnes))
-        except ValueError:
+            """Atualiza os gráficos e tabela de benchmarking conforme seleção."""
+            m = self._metrics
+            if m is None or m.benchmarking is None or m.benchmarking.is_empty():
+                self.lbl_bench_summary.setText(
+                    "Hospital: ——   Nível geográfico: ——   Comparando com —— hospitais (sem benchmarking no momento).")
+                if pg is not None:
+                    self.plot_bench_bar.clear(); self.plot_bench_scatter.clear()
+                self._plfill(self.tbl_bench, pl.DataFrame({"Info": [
+                    "Nenhum dado de benchmarking disponível. Rode um pipeline com dados CNES/SIA/SIH carregado."]}))
+                return
+            df = m.benchmarking
+            alvo_cnes = self.cbo_bench_hospital.currentData()
+            nivel_chave = self.cbo_bench_level.currentData() or "nivel_uf"
+            ind = self.cbo_bench_ind.currentData() or "icsap_pct"
+            nivel_label = dict(
+                (self.cbo_bench_level.itemText(i), self.cbo_bench_level.itemText(i))
+                for i in range(self.cbo_bench_level.count())
+            ).get(
+                self.cbo_bench_level.itemText(self.cbo_bench_level.currentIndex()),
+                nivel_chave,
+            )
+            linha_alvo = df.filter(pl.col("hospital_cnes") == str(alvo_cnes))
+            if linha_alvo.is_empty():
+                self.lbl_bench_summary.setText(
+                    f"Hospital não encontrado no conjunto; {df.height} hospitais totais.")
+                return
+            alvo_chave = str(linha_alvo[nivel_chave][0] or "")
+            if alvo_chave:
+                df_comp = df.filter(pl.col(nivel_chave) == alvo_chave)
+            else:
+                df_comp = df.clone()
+            if ind in df_comp.columns:
+                df_comp = df_comp.filter(pl.col(ind).is_not_null())
+            n_comp = df_comp.height
+            if n_comp == 0:
+                self.lbl_bench_summary.setText(
+                    f"Hospital: ——   Nível geográfico: {nivel_label}   Nenhum hospital com dados para o indicador selecionado.")
+                return
+            sort_desc = ind in self._INDICADOR_PIOR_ALTO
+            df_sorted = df_comp.sort(by=ind, descending=sort_desc)
             alvo_i = None
-        self.lbl_bench_summary.setText(
-            f"Hospital: {self.cbo_bench_hospital.currentText()}   "
-            f"Nível geográfico: {nivel_label}   "
-            f"Comparando com {n_comp} hospitais."
-        )
-        # ---------- Gráfico de barras
-        if pg is not None:
-            self.plot_bench_bar.clear()
-            vals = df_sorted[ind].cast(pl.Float64, strict=False).fill_nan(None).to_list()
-            xs = list(range(len(vals)))
-            # Cores de barra
-            brushes_list = []
-            max_v = max((v for v in vals if v is not None), default=1.0) or 1.0
-            for i, v in enumerate(vals):
-                if i == alvo_i:
-                    brushes_list.append(QBrush(QColor(_OK)))
-                    continue
-                if v is None:
-                    brushes_list.append(QBrush(QColor("#475569")))
-                    continue
-                t = min(1.0, float(v) / max_v) if max_v > 0 else 0.0
-                if ind in self._INDICADOR_PIOR_ALTO:
-                    color = _lerp_color(_OK, _DANG, t)
-                else:  # CMI etc.: maior = complexo, então azul→roxo
-                    color = _lerp_color("#818CF8", "#A855F7", t)
-                brushes_list.append(QBrush(color))
-            bg = pg.BarGraphItem(x=xs, height=vals, width=0.35, brushes=brushes_list)
-            self.plot_bench_bar.addItem(bg)
-            mediana = 0.0
-            if vals and any(v is not None for v in vals):
-                mediana = float(df_sorted[ind].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
-                self.plot_bench_bar.addItem(
-                    pg.InfiniteLine(pos=mediana, angle=0, pen=_pen(_WARN, 2, Qt.DashLine)))
-            # Labels do eixo X: nome CNES ou últimos 7
-            def _short(t: str) -> str:
-                tt = (t or "").strip()
-                return tt if len(tt) <= 7 else tt[-7:]
-            tick_eixo = [
-                (_i, _short(str(c)))
-                for _i, c in enumerate(df_sorted["hospital_cnes"].to_list())
-                if _i % max(1, len(xs)//15) == 0
-            ]
-            self.plot_bench_bar.getAxis("bottom").setTicks([tick_eixo])
-            self.plot_bench_bar.setXRange(-0.5, len(xs)-0.5, padding=0)
-            self.plot_bench_bar.setTitle(
-                f"Benchmark {self.cbo_bench_ind.currentText()} — {n_comp} hospitais (mediana {mediana:.2f} em amarelo)",
-                color=_TXT, size="10pt")
-            # ---------- Scatter (X=%ICSAP, Y=LOS medio)
-            self.plot_bench_scatter.clear()
-            col_x = "icsap_pct"
-            col_y = "los_medio_dias"
-            if col_x in df_sorted.columns and col_y in df_sorted.columns:
-                scat = df_sorted.select([col_x, col_y, "hospital_cnes"])
-                xs_all = scat[col_x].cast(pl.Float64, strict=False).fill_nan(None).to_list()
-                ys_all = scat[col_y].cast(pl.Float64, strict=False).fill_nan(None).to_list()
-                alvo_cnes_s = str(alvo_cnes)
-                others_x, others_y, target_x, target_y = [], [], None, None
-                for _i, _c in enumerate(scat["hospital_cnes"].to_list()):
-                    xi = xs_all[_i]; yi = ys_all[_i]
-                    if xi is None or yi is None or not math.isfinite(float(xi)) or not math.isfinite(float(yi)):
-                        continue
-                    if str(_c) == alvo_cnes_s:
-                        target_x, target_y = float(xi), float(yi)
-                    else:
-                        others_x.append(float(xi)); others_y.append(float(yi))
-                if others_x:
-                    sp_o = pg.ScatterPlotItem(x=others_x, y=others_y, size=8,
-                                               pen=_pen("#475569"), brush=_brush(_TXT_DIM))
-                    self.plot_bench_scatter.addItem(sp_o)
-                if target_x is not None and target_y is not None:
-                    sp_t = pg.ScatterPlotItem(x=[target_x], y=[target_y], size=18,
-                                               pen=_pen(_OK), brush=_brush(_OK))
-                    self.plot_bench_scatter.addItem(sp_t)
-                # Medianas tracejadas
+            ordered_cnes = df_sorted["hospital_cnes"].to_list()
+            try:
+                alvo_i = ordered_cnes.index(str(alvo_cnes))
+            except ValueError:
+                alvo_i = None
+            self.lbl_bench_summary.setText(
+                f"Hospital: {self.cbo_bench_hospital.currentText()}   "
+                f"Nível geográfico: {nivel_label}   "
+                f"Comparando com {n_comp} hospitais."
+            )
+
+            def _vis(v):
                 try:
-                    med_x = float(df_sorted[col_x].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
-                    med_y = float(df_sorted[col_y].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
-                    self.plot_bench_scatter.addItem(pg.InfiniteLine(pos=med_x, angle=90, pen=_pen(_WARN, 1, Qt.DashLine)))
-                    self.plot_bench_scatter.addItem(pg.InfiniteLine(pos=med_y, angle=0, pen=_pen(_WARN, 1, Qt.DashLine)))
+                    if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+                        return 0.1
+                    return v if v > 0 else 0.1
                 except Exception:
-                    pass
-                self.plot_bench_scatter.setLabel("bottom", "% ICSAP (evitáveis)")
-                self.plot_bench_scatter.setLabel("left", "LOS médio (dias)")
-        # ---------- Tabela
-        colunas_uteis = [
-            "hospital_cnes", "hospital_nome", "CO_UF", "CO_MUNICIPIO",
-            "n_altas", ind, "icsap_pct", "los_medio_dias", "cmi", "lace_medio",
-            "pct_alto", "readmissao_30d_pct", "custo_oe", "los_o_e",
-        ]
-        cols_existem = list(dict.fromkeys(c for c in colunas_uteis if c in df_sorted.columns))
-        self._plfill(self.tbl_bench, df_sorted.select(cols_existem) if cols_existem else df_sorted)
+                    return 0.1
+
+            if pg is not None:
+                self.plot_bench_bar.clear()
+                vals_raw = df_sorted[ind].cast(pl.Float64, strict=False).fill_nan(None).to_list()
+                vals = [_vis(v) for v in vals_raw]
+                xs = list(range(len(vals)))
+                brushes_list = []
+                max_v = max((v for v in vals if v is not None), default=1.0) or 1.0
+                for i, v in enumerate(vals):
+                    if i == alvo_i:
+                        brushes_list.append(QBrush(QColor(_OK)))
+                        continue
+                    if v is None:
+                        brushes_list.append(QBrush(QColor("#475569")))
+                        continue
+                    t = min(1.0, float(v) / max_v) if max_v > 0 else 0.0
+                    if ind in self._INDICADOR_PIOR_ALTO:
+                        color = _lerp_color(_OK, _DANG, t)
+                    else:
+                        color = _lerp_color("#818CF8", "#A855F7", t)
+                    brushes_list.append(QBrush(color))
+                bg = pg.BarGraphItem(x=xs, height=vals, width=0.35, brushes=brushes_list)
+                self.plot_bench_bar.addItem(bg)
+                mediana = 0.0
+                if vals and any(v is not None for v in vals):
+                    mediana = float(df_sorted[ind].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
+                    self.plot_bench_bar.addItem(
+                        pg.InfiniteLine(pos=mediana, angle=0, pen=_pen(_WARN, 2, Qt.DashLine)))
+                def _short(t: str) -> str:
+                    tt = (t or "").strip()
+                    return tt if len(tt) <= 7 else tt[-7:]
+                tick_eixo = [
+                    (_i, _short(str(c)))
+                    for _i, c in enumerate(df_sorted["hospital_cnes"].to_list())
+                    if _i % max(1, len(xs)//15) == 0
+                ]
+                self.plot_bench_bar.getAxis("bottom").setTicks([tick_eixo])
+                self.plot_bench_bar.setXRange(-0.5, len(xs)-0.5, padding=0)
+                self.plot_bench_bar.setYRange(0, max(105.0, float(max_v) * 1.1), padding=0)
+                self.plot_bench_bar.setTitle(
+                    f"Benchmark {self.cbo_bench_ind.currentText()} — {n_comp} hospitais (mediana {mediana:.2f} em amarelo)",
+                    color=_TXT, size="10pt")
+                self.plot_bench_scatter.clear()
+                col_x = "icsap_pct"
+                col_y = "los_medio_dias"
+                if col_x in df_sorted.columns and col_y in df_sorted.columns:
+                    scat = df_sorted.select([col_x, col_y, "hospital_cnes"])
+                    xs_all = scat[col_x].cast(pl.Float64, strict=False).fill_nan(None).to_list()
+                    ys_all = scat[col_y].cast(pl.Float64, strict=False).fill_nan(None).to_list()
+                    alvo_cnes_s = str(alvo_cnes)
+                    others_x, others_y, target_x, target_y = [], [], None, None
+                    for _i, _c in enumerate(scat["hospital_cnes"].to_list()):
+                        xi = xs_all[_i]; yi = ys_all[_i]
+                        if xi is None or yi is None or not math.isfinite(float(xi)) or not math.isfinite(float(yi)):
+                            continue
+                        if str(_c) == alvo_cnes_s:
+                            target_x, target_y = float(xi), float(yi)
+                        else:
+                            others_x.append(float(xi)); others_y.append(float(yi))
+                    if others_x:
+                        sp_o = pg.ScatterPlotItem(x=others_x, y=others_y, size=8,
+                                                   pen=_pen("#475569"), brush=_brush(_TXT_DIM))
+                        self.plot_bench_scatter.addItem(sp_o)
+                    if target_x is not None and target_y is not None:
+                        sp_t = pg.ScatterPlotItem(x=[target_x], y=[target_y], size=18,
+                                                   pen=_pen(_OK), brush=_brush(_OK))
+                        self.plot_bench_scatter.addItem(sp_t)
+                    try:
+                        med_x = float(df_sorted[col_x].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
+                        med_y = float(df_sorted[col_y].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
+                        self.plot_bench_scatter.addItem(pg.InfiniteLine(pos=med_x, angle=90, pen=_pen(_WARN, 1, Qt.DashLine)))
+                        self.plot_bench_scatter.addItem(pg.InfiniteLine(pos=med_y, angle=0, pen=_pen(_WARN, 1, Qt.DashLine)))
+                    except Exception:
+                        pass
+                    self.plot_bench_scatter.setLabel("bottom", "% ICSAP (evitáveis)")
+                    self.plot_bench_scatter.setLabel("left", "LOS médio (dias)")
+            colunas_uteis = [
+                "hospital_cnes", "hospital_nome", "CO_UF", "CO_MUNICIPIO",
+                "n_altas", ind, "icsap_pct", "los_medio_dias", "cmi", "lace_medio",
+                "pct_alto", "readmissao_30d_pct", "custo_oe", "los_o_e",
+            ]
+            cols_existem = list(dict.fromkeys(c for c in colunas_uteis if c in df_sorted.columns))
+            self._plfill(self.tbl_bench, df_sorted.select(cols_existem) if cols_existem else df_sorted)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_bench_changed: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
+            try:
+                if pg is not None:
+                    self.plot_bench_bar.clear(); self.plot_bench_scatter.clear()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Curvas de decaimento exponencial
     # ------------------------------------------------------------------
     def _on_decay_hospital_changed(self, _idx: int = 0) -> None:
-        m = self._metrics
-        if m is None or m.distance_decay.is_empty():
+        try:
+            m = self._metrics
+            if m is None or m.distance_decay is None or m.distance_decay.is_empty():
+                if pg is not None:
+                    self.plot_distance_decay.clear()
+                self.lbl_decay_params.setText(
+                    "Ajuste exponencial: y = A · exp(−λ · km)   λ = ——   R² = ——   DMP (km) = ——")
+                self._plfill(self.tbl_distance_decay, pl.DataFrame(
+                    {"Observação": ["Sem curvas de decaimento. Dados CNES/Municípios faltando."]}))
+                return
+            cnes = self.cbo_decay_hospital.currentData()
+            if not cnes:
+                return
+            df = m.distance_decay.filter(pl.col("hospital_cnes") == str(cnes))
+            if df.is_empty():
+                return
+            A = float(df["A_exp"][0]) if "A_exp" in df.columns and df.height else 0.0
+            lam = float(df["lambda_exp"][0]) if "lambda_exp" in df.columns and df.height else 0.0
+            R2 = float(df["R2_exp"][0]) if "R2_exp" in df.columns and df.height else 0.0
+            dmp = float(df["dmp_km"][0]) if "dmp_km" in df.columns and df.height else 0.0
+            self.lbl_decay_params.setText(
+                f"Ajuste exponencial:  y = {A:.2f} · exp(−{lam:.4f} · km)    "
+                f"λ = {lam:.4f}     R² = {R2:.3f}     DMP (km) = {dmp:.1f}")
             if pg is not None:
                 self.plot_distance_decay.clear()
-            self.lbl_decay_params.setText(
-                "Ajuste exponencial: y = A · exp(−λ · km)   λ = ——   R² = ——   DMP (km) = ——")
-            self._plfill(self.tbl_distance_decay, pl.DataFrame(
-                {"Observação": ["Sem curvas de decaimento. Dados CNES/Municípios faltando."]}))
-            return
-        cnes = self.cbo_decay_hospital.currentData()
-        if not cnes:
-            return
-        df = m.distance_decay.filter(pl.col("hospital_cnes") == str(cnes))
-        if df.is_empty():
-            return
-        # Parâmetros do ajuste (primeira linha, repetido em todas)
-        A = float(df["A_exp"][0]) if "A_exp" in df.columns and df.height else 0.0
-        lam = float(df["lambda_exp"][0]) if "lambda_exp" in df.columns and df.height else 0.0
-        R2 = float(df["R2_exp"][0]) if "R2_exp" in df.columns and df.height else 0.0
-        dmp = float(df["dmp_km"][0]) if "dmp_km" in df.columns and df.height else 0.0
-        self.lbl_decay_params.setText(
-            f"Ajuste exponencial:  y = {A:.2f} · exp(−{lam:.4f} · km)    "
-            f"λ = {lam:.4f}     R² = {R2:.3f}     DMP (km) = {dmp:.1f}")
-        # --- Gráfico
-        if pg is not None:
-            self.plot_distance_decay.clear()
-            mid_km = df["faixa_mid_km"].cast(pl.Float64).to_list()
-            taxa = df["taxa_por_1000"].cast(pl.Float64).to_list()
-            # Pontos observados (laranja)
-            xs_obs = [float(x) for x, y in zip(mid_km, taxa) if y is not None and math.isfinite(float(y))]
-            ys_obs = [float(y) for x, y in zip(mid_km, taxa) if y is not None and math.isfinite(float(y))]
-            if xs_obs:
-                sp = pg.ScatterPlotItem(x=xs_obs, y=ys_obs, size=12, symbol="o",
-                                        pen=_pen(_WARN), brush=_brush(_WARN))
-                self.plot_distance_decay.addItem(sp)
-            # Curva ajustada: 100 amostras de 0 a 80 km
-            if lam >= 0 and A > 0:
-                n_pts = 100
-                xs_curve = [80.0 * (i / (n_pts - 1)) for i in range(n_pts)]
-                ys_curve = [A * math.exp(-lam * xx) for xx in xs_curve]
-                self.plot_distance_decay.plot(
-                    xs_curve, ys_curve, pen=_pen(_PRI, 3), name="Ajuste exp."
-                )
-            self.plot_distance_decay.setLabel("bottom", "Distância do hospital (km)")
-            self.plot_distance_decay.setLabel("left", "Taxa de internação / 1.000 hab.")
-            self.plot_distance_decay.setXRange(0, 82, padding=0)
-            max_y = max(ys_obs + [A * 1.05]) if ys_obs else 1.0
-            if max_y <= 0:
-                max_y = 1.0
-            self.plot_distance_decay.setYRange(0, float(max_y) * 1.15, padding=0)
-        # --- Tabela 5 anéis
-        cols_tab = ["faixa_km_label", "pop_anel", "n_internacoes", "taxa_por_1000"]
-        cols_show = [c for c in cols_tab if c in df.columns]
-        tab_df = df.select(cols_show) if cols_show else df
-        # Renomeia cabeçalhos
-        rename_map = {
-            "faixa_km_label": "Faixa de distância",
-            "pop_anel": "População anel",
-            "n_internacoes": "Nº internações",
-            "taxa_por_1000": "Taxa / 1.000 hab.",
-        }
-        final_cols = {}
-        for c in tab_df.columns:
-            final_cols[c] = rename_map.get(c, c)
-        tab_df = tab_df.rename(final_cols)
-        self._plfill(self.tbl_distance_decay, tab_df)
+                mid_km = df["faixa_mid_km"].cast(pl.Float64).to_list()
+                taxa = df["taxa_por_1000"].cast(pl.Float64).to_list()
+                xs_obs, ys_obs = [], []
+                for x, y in zip(mid_km, taxa):
+                    try:
+                        if y is not None and math.isfinite(float(y)):
+                            xs_obs.append(float(x)); ys_obs.append(float(y))
+                    except Exception:
+                        continue
+                if xs_obs:
+                    sp = pg.ScatterPlotItem(x=xs_obs, y=ys_obs, size=12, symbol="o",
+                                            pen=_pen(_WARN), brush=_brush(_WARN))
+                    self.plot_distance_decay.addItem(sp)
+                if lam >= 0 and A > 0:
+                    n_pts = 100
+                    xs_curve = [80.0 * (i / (n_pts - 1)) for i in range(n_pts)]
+                    ys_curve = [A * math.exp(-lam * xx) for xx in xs_curve]
+                    self.plot_distance_decay.plot(
+                        xs_curve, ys_curve, pen=_pen(_PRI, 3), name="Ajuste exp."
+                    )
+                self.plot_distance_decay.setLabel("bottom", "Distância do hospital (km)")
+                self.plot_distance_decay.setLabel("left", "Taxa de internação / 1.000 hab.")
+                self.plot_distance_decay.setXRange(0, 82, padding=0)
+                max_y = max(ys_obs + [A * 1.05]) if ys_obs else 1.0
+                if max_y <= 0:
+                    max_y = 1.0
+                self.plot_distance_decay.setYRange(0, float(max_y) * 1.15, padding=0)
+            cols_tab = ["faixa_km_label", "pop_anel", "n_internacoes", "taxa_por_1000"]
+            cols_show = [c for c in cols_tab if c in df.columns]
+            tab_df = df.select(cols_show) if cols_show else df
+            rename_map = {
+                "faixa_km_label": "Faixa de distância",
+                "pop_anel": "População anel",
+                "n_internacoes": "Nº internações",
+                "taxa_por_1000": "Taxa / 1.000 hab.",
+            }
+            final_cols = {}
+            for c in tab_df.columns:
+                final_cols[c] = rename_map.get(c, c)
+            tab_df = tab_df.rename(final_cols)
+            self._plfill(self.tbl_distance_decay, tab_df)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_decay_hospital_changed: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
+            try:
+                if pg is not None:
+                    self.plot_distance_decay.clear()
+            except Exception:
+                pass
