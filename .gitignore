@@ -84,3 +84,13 @@ output/
 .venv/
 __pycache__/
 *.pyc
+
+# gerados por build\build.ps1, docker\build-docker-installer.ps1 e pelo app - nao versionar
+.venv/
+.venv-build/
+dist/
+build/GSPHosp/
+build/versao.txt
+output/
+__pycache__/
+*.pyc
