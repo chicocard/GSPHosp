@@ -94,3 +94,4 @@ build/versao.txt
 output/
 __pycache__/
 *.pyc
+!build/GSPHosp.spec

@@ -1,0 +1,24 @@
+# GSPHosp em Docker. Uso:
+#   docker compose up -d          → sobe; abra http://localhost:5800
+#   docker compose down           → para (os dados ficam nos volumes)
+#   docker compose pull && docker compose up -d   → atualiza para a imagem da versão em .env
+services:
+  gsphosp:
+    image: ghcr.io/chicocard/gsphosp:${GSPHOSP_VERSION:-latest}
+    container_name: gsphosp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GSPHOSP_PORT:-5800}:5800"   # só a própria máquina; para servir na rede, remova o 127.0.0.1 e proteja com senha/proxy
+    environment:
+      GSPHOSP_RES: ${GSPHOSP_RES:-1600x900}
+    volumes:
+      - gsphosp-data:/data            # cache, logs, CNES e saídas
+      - ${GSPHOSP_OUTPUT_DIR:-./output}:/data/output   # saídas CSV/Parquet acessíveis na máquina
+    shm_size: "1g"                     # Chromium do QtWebEngine
+    # Para construir localmente em vez de puxar do ghcr.io:
+    # build:
+    #   context: .
+    #   dockerfile: docker/Dockerfile
+
+volumes:
+  gsphosp-data:

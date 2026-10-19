@@ -1,0 +1,11 @@
+.git
+.venv
+.venv-build
+__pycache__
+*.pyc
+dist
+build/versao.txt
+output
+*.dbc
+*.parquet.tmp
+.trae
