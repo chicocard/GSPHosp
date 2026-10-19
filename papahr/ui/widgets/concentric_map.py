@@ -102,7 +102,7 @@ class ConcentricRingsMap(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(520, 480)
+        self.setMinimumSize(380, 340)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
         self.setStyleSheet(f"background:{C_BG};border-radius:12px;border:1px solid {C_AXIS};")
@@ -116,15 +116,20 @@ class ConcentricRingsMap(QWidget):
         self._drag_pos: QPointF | None = None
         self._max_rate_display: float = 10.0  # por 1000hab (paleta)
         self._tooltip_pixmap = QPixmap()
+        self._mun_points: list[list[float]] = []   # [lat, lon, pop, n_internacoes]
+        self._proc_g: str | None = None
+        self._proc_f: str | None = None
+        self._proc_p: str | None = None
 
         self._empty_layout = QVBoxLayout(self)
         self._empty_layout.setContentsMargins(16, 16, 16, 16)
         self._empty_layout.setAlignment(Qt.AlignCenter)
         self._empty_label = QLabel(
-            "<h3 style='color:#94A3B8;margin:0;font-weight:600'>📍 Selecione ao menos 1 hospital no Passo 4</h3>"
+            "<h3 style='color:#94A3B8;margin:0;font-weight:600'>📍 Nenhum hospital georreferenciado no dataset</h3>"
             "<br>"
             "<p style='color:#64748B;font-size:13px;margin:0;line-height:1.5'>"
-            "Os anéis concêntricos são calculados automaticamente a partir das coordenadas geográficas."
+            "O mapa usa as coordenadas do CNES (tbEstabelecimento) dos hospitais presentes na extração. "
+            "Rode o pipeline ou carregue um Parquet com a coluna CNES."
             "</p>"
         )
         self._empty_label.setAlignment(Qt.AlignCenter)
@@ -157,135 +162,159 @@ class ConcentricRingsMap(QWidget):
         self._max_rate_display = max(1.0, float(v))
         self.update()
 
+    @staticmethod
+    def _key6_expr(col: str) -> pl.Expr:
+        """Código IBGE em 6 dígitos: "0120020" (zfill) → "120020"; "1200203" (com DV) → "120020"."""
+        c = pl.col(col).cast(pl.Utf8, strict=False).str.strip_chars()
+        return (
+            pl.when(c.str.starts_with("0") & (c.str.len_chars() == 7))
+            .then(c.str.slice(1, 6))
+            .otherwise(c.str.slice(0, 6))
+        )
+
     def set_data(self,
                  points: Sequence[HospitalMapPoint],
                  municipios_df: pl.DataFrame,
                  internacoes_df: pl.DataFrame | None = None) -> None:
-        """Calcula buckets por anel e hospital.
+        """Calcula buckets por anel e hospital (vetorizado em Polars).
 
         Args:
-            points: hospitais.
-            municipios_df: colunas CO_MUNICIPIO, NU_LATITUDE, NU_LONGITUDE, NU_POPULACAO, (opc) NO_MUNICIPIO, SIGLA_ESTADO
-            internacoes_df: colunas MUNIC_RES (6 dígitos IBGE, 7→6) e CNES/CO_CNES
-                            + (opc) CO_GRUPO, NO_GRUPO, CO_FORMA_ORGANIZACAO, NO_FORMA_ORGANIZACAO,
-                                   CO_PROCEDIMENTO, NO_PROCEDIMENTO, QT_PROCED, VAL_TOTAL.
+            points: hospitais (já restritos aos presentes no dataset).
+            municipios_df: CO_MUNICIPIO, NU_LATITUDE, NU_LONGITUDE, NU_POPULACAO (CNES tbMunicipio
+                           com centroides derivados pelo CNESLoader).
+            internacoes_df: dataset analítico com MUNIC_RES/PA_MUNPCN/SP_M_PAC e CNES
+                            (+ opcional NO_GRUPO / NO_FORMA_ORGANIZACAO / NO_PROCEDIMENTO, VAL_TOT).
         """
         self._points = list(points)
-        # Agrupa internações por (municipio_res, cnes)
-        agg_mun = pl.DataFrame()
+        self._buckets = {}
+        self._mun_points = []
+        self._proc_g = self._proc_f = self._proc_p = None
+        if not self._points:
+            self._reset_view(); self._update_empty_visibility(); self.update()
+            return
+        radii = list(self._radii_km)
+        rmax = max(radii)
+        lats = [p.latitude for p in self._points]
+        lons = [p.longitude for p in self._points]
+
+        # 1) municípios com coordenadas, só dentro da caixa envolvente (hospitais + raio máximo)
+        mun = pl.DataFrame()
+        if municipios_df is not None and not municipios_df.is_empty():
+            lat_col = self._find_col(municipios_df, ("NU_LATITUDE", "LATITUDE", "lat", "latitude"))
+            lon_col = self._find_col(municipios_df, ("NU_LONGITUDE", "LONGITUDE", "lon", "longitude"))
+            cod_col = self._find_col(municipios_df, ("CO_MUNICIPIO", "CO_MUNICIPIO_IBGE", "COD_MUNICIPIO", "codigo_municipio"))
+            pop_col = self._find_col(municipios_df, ("NU_POPULACAO", "POPULACAO", "populacao"))
+            if lat_col and lon_col and cod_col:
+                dlat = rmax * 1.35 / 111.0
+                clat = sum(lats) / len(lats)
+                dlon = rmax * 1.35 / max(1.0, 111.0 * math.cos(math.radians(clat)))
+                mun = (
+                    municipios_df.select([
+                        self._key6_expr(cod_col).alias("key6"),
+                        pl.col(lat_col).cast(pl.Float64, strict=False).alias("lat"),
+                        pl.col(lon_col).cast(pl.Float64, strict=False).alias("lon"),
+                        (pl.col(pop_col).cast(pl.Float64, strict=False).fill_null(0.0)
+                         if pop_col else pl.lit(0.0)).alias("pop"),
+                    ])
+                    .filter(pl.col("lat").is_not_null() & pl.col("lon").is_not_null()
+                            & pl.col("lat").is_not_nan() & pl.col("lon").is_not_nan())
+                    .filter(pl.col("lat").is_between(min(lats) - dlat, max(lats) + dlat)
+                            & pl.col("lon").is_between(min(lons) - dlon, max(lons) + dlon))
+                    .unique(subset=["key6"], keep="first")
+                )
+
+        # 2) internações agregadas por (município de residência, CNES[, grupo, forma, procedimento])
+        agg = pl.DataFrame()
         if internacoes_df is not None and not internacoes_df.is_empty():
-            mun_col = self._find_col(internacoes_df, ("MUNIC_RES", "CO_MUNICIPIO", "municipio_residencia"))
+            mun_col = self._find_col(internacoes_df, ("MUNIC_RES", "PA_MUNPCN", "SP_M_PAC", "CO_MUNICIPIO",
+                                                      "municipio_residencia"))
             cnes_col = self._find_col(internacoes_df, ("CNES", "CO_CNES", "cnes", "ID_HOSPITAL", "_cnes"))
             if mun_col and cnes_col:
-                g_cols: list[str] = [mun_col, cnes_col]
-                agg_exprs = [pl.count().alias("n_internacoes")]
-                # Valor total
-                for c in ("VAL_TOTAL", "VL_TOTAL", "VALOR_TOTAL", "vlr_total"):
-                    if c in internacoes_df.columns:
-                        agg_exprs.append(pl.col(c).cast(pl.Float64, strict=False).fill_null(0).sum().alias("valor_total"))
-                        break
-                # Agrupa também por grupo/forma/procedimento se existir
-                self._proc_g = self._find_col(internacoes_df, ("NO_GRUPO", "CO_GRUPO", "grupo"))
-                self._proc_f = self._find_col(internacoes_df, ("NO_FORMA_ORGANIZACAO", "CO_FORMA_ORGANIZACAO", "forma_organizacao"))
-                self._proc_p = self._find_col(internacoes_df, ("NO_PROCEDIMENTO", "CO_PROCEDIMENTO", "procedimento"))
-                for c in (self._proc_g, self._proc_f, self._proc_p):
-                    if c and c not in g_cols:
-                        g_cols.append(c)
+                self._proc_g = self._find_col(internacoes_df, ("NO_GRUPO", "Grupo de Procedimentos", "CO_GRUPO", "grupo"))
+                self._proc_f = self._find_col(internacoes_df, ("NO_FORMA_ORGANIZACAO", "Forma de organizacao",
+                                                               "CO_FORMA_ORGANIZACAO", "forma_organizacao"))
+                self._proc_p = self._find_col(internacoes_df, ("NO_PROCEDIMENTO", "Procedimentos realizados",
+                                                               "CO_PROCEDIMENTO", "procedimento"))
+                extra = [c for c in (self._proc_g, self._proc_f, self._proc_p) if c]
+                val_col = next((c for c in ("VAL_TOT", "VAL_TOTAL", "VL_TOTAL", "VALOR_TOTAL", "Valor Total",
+                                            "PA_VALAPR", "Valor Aprovado", "SP_VALATO")
+                                if c in internacoes_df.columns), None)
+                exprs = [pl.len().alias("n"), pl.col("_valor").sum().alias("valor")]
                 try:
-                    agg_mun = internacoes_df.group_by(g_cols).agg(agg_exprs)
-                except Exception:
-                    agg_mun = pl.DataFrame()
-        # Agrupa por (mun, cnes) - simplifica para buckets
-        buckets_per_hospital: dict[str, list[RingBucket]] = {}
+                    agg = (
+                        internacoes_df.select(
+                            [self._key6_expr(mun_col).alias("key6"),
+                             pl.col(cnes_col).cast(pl.Utf8, strict=False).str.strip_chars().str.zfill(7).alias("cnes"),
+                             (pl.col(val_col).cast(pl.Float64, strict=False).fill_null(0.0)
+                              if val_col else pl.lit(0.0)).alias("_valor")]
+                            + [pl.col(c).cast(pl.Utf8, strict=False).alias(c) for c in extra]
+                        )
+                        .group_by(["key6", "cnes"] + extra)
+                        .agg(exprs)
+                    )
+                except Exception as exc_agg:  # noqa: BLE001
+                    log_warn = getattr(self, "_log_warn", None)
+                    agg = pl.DataFrame()
+                    print(f"[mapa] falha ao agregar internacoes: {exc_agg}", flush=True)
+
+        # 3) buckets por hospital
+        mun_dots: dict[str, list[float]] = {}
         for hp in self._points:
-            buckets = [RingBucket(i, r) for i, r in enumerate(self._radii_km)]
-            buckets_per_hospital[hp.cnes] = buckets
-            if municipios_df.is_empty():
+            buckets = [RingBucket(i, r) for i, r in enumerate(radii)]
+            self._buckets[hp.cnes] = buckets
+            if mun.is_empty():
                 continue
-            # Para cada município, distância para o hospital → bucket (busca segura de colunas)
-            lat_col = self._find_col(municipios_df, ("NU_LATITUDE", "LATITUDE", "lat", "latitude", "NU_LATITUDE_MUN"))
-            lon_col = self._find_col(municipios_df, ("NU_LONGITUDE", "LONGITUDE", "lon", "longitude", "NU_LONGITUDE_MUN"))
-            cod_col = self._find_col(municipios_df, ("CO_MUNICIPIO", "CO_MUNICIPIO_IBGE", "COD_MUNICIPIO", "codigo_municipio"))
-            if not lat_col or not lon_col or not cod_col or lat_col not in municipios_df.columns or lon_col not in municipios_df.columns or cod_col not in municipios_df.columns:
+            lat1 = math.radians(hp.latitude); lon1 = math.radians(hp.longitude)
+            lat2 = pl.col("lat").radians(); lon2 = pl.col("lon").radians()
+            a = ((lat2 - lat1) / 2).sin() ** 2 + math.cos(lat1) * lat2.cos() * ((lon2 - lon1) / 2).sin() ** 2
+            dist = 2.0 * 6371.0 * a.sqrt().arcsin()
+            ring = pl.lit(len(radii) - 1)
+            for i in reversed(range(len(radii))):
+                ring = pl.when(dist <= radii[i]).then(pl.lit(i)).otherwise(ring)
+            md = mun.with_columns(dist.alias("dist_km"), ring.cast(pl.Int64).alias("ring")).filter(pl.col("dist_km") <= rmax)
+            if md.is_empty():
                 continue
+            pop_ring = md.group_by("ring").agg(pl.col("pop").sum().alias("pop"))
+            for r_i, p_sum in zip(pop_ring["ring"].to_list(), pop_ring["pop"].to_list()):
+                buckets[int(r_i)].populacao_total = float(p_sum or 0.0)
+            n_by_key: dict[str, float] = {}
+            if not agg.is_empty():
+                a_h = agg.filter(pl.col("cnes") == str(hp.cnes).strip().zfill(7)) \
+                         .join(md.select(["key6", "ring"]), on="key6", how="inner")
+                if not a_h.is_empty():
+                    tot = a_h.group_by("ring").agg(pl.col("n").sum().alias("n"), pl.col("valor").sum().alias("valor"))
+                    for r_i, n_v, v_v in zip(tot["ring"].to_list(), tot["n"].to_list(), tot["valor"].to_list()):
+                        b = buckets[int(r_i)]
+                        b.n_internacoes = int(n_v or 0); b.valor_total = float(v_v or 0.0)
+                    for col_name, attr in ((self._proc_g, "procedimentos_por_grupo"),
+                                           (self._proc_f, "procedimentos_por_forma"),
+                                           (self._proc_p, "procedimentos_por_cod")):
+                        if not col_name:
+                            continue
+                        g = a_h.group_by(["ring", col_name]).agg(pl.col("n").sum().alias("n"))
+                        for r_i, k, n_v in zip(g["ring"].to_list(), g[col_name].to_list(), g["n"].to_list()):
+                            if k is None or str(k).strip() == "":
+                                continue
+                            d = getattr(buckets[int(r_i)], attr)
+                            d[str(k)] = d.get(str(k), 0) + int(n_v or 0)
+                    km = a_h.group_by("key6").agg(pl.col("n").sum().alias("n"))
+                    n_by_key = {str(k): float(v or 0) for k, v in zip(km["key6"].to_list(), km["n"].to_list())}
+            for k, la, lo, po in zip(md["key6"].to_list(), md["lat"].to_list(), md["lon"].to_list(), md["pop"].to_list()):
+                n_here = n_by_key.get(str(k), 0.0)
+                cur = mun_dots.get(str(k))
+                if cur is None:
+                    mun_dots[str(k)] = [float(la), float(lo), float(po or 0.0), n_here]
+                else:
+                    cur[3] += n_here
+        self._mun_points = list(mun_dots.values())
 
-            lats = municipios_df[lat_col].cast(pl.Float64, strict=False).fill_nan(None).fill_null(None)
-            lons = municipios_df[lon_col].cast(pl.Float64, strict=False).fill_nan(None).fill_null(None)
-            cods = municipios_df[cod_col].cast(pl.Utf8).fill_null("")
-            pop_col = self._find_col(municipios_df, ("NU_POPULACAO", "POPULACAO", "populacao"))
-            pops = (municipios_df[pop_col].cast(pl.Float64, strict=False)
-                    if pop_col and pop_col in municipios_df.columns else pl.repeat(0.0, municipios_df.height))
-            # Internações deste hospital
-            mun_hp_counts: dict[str, dict[str, Any]] = {}
-            if not agg_mun.is_empty() and cnes_col is not None and mun_col is not None:
-                filt = agg_mun.filter(pl.col(cnes_col) == hp.cnes)
-                # Agrupa por município
-                mun_keys: dict[str, dict[str, Any]] = {}
-                for row in filt.to_dicts():
-                    mkey = str(row.get(mun_col, ""))
-                    # Trunca municípios 7→6 dígitos
-                    if mkey and len(mkey) > 6:
-                        mkey = mkey[:6]
-                    d = mun_keys.setdefault(mkey, {"n": 0, "valor": 0.0, "grupos": {}, "formas": {}, "procs": {}})
-                    d["n"] += int(row.get("n_internacoes", 0))
-                    d["valor"] += float(row.get("valor_total", 0.0) or 0.0)
-                    if self._proc_g:
-                        g = str(row.get(self._proc_g, "") or "")
-                        if g:
-                            d["grupos"][g] = d["grupos"].get(g, 0) + int(row.get("n_internacoes", 0))
-                    if self._proc_f:
-                        f = str(row.get(self._proc_f, "") or "")
-                        if f:
-                            d["formas"][f] = d["formas"].get(f, 0) + int(row.get("n_internacoes", 0))
-                    if self._proc_p:
-                        p = str(row.get(self._proc_p, "") or "")
-                        if p:
-                            d["procs"][p] = d["procs"].get(p, 0) + int(row.get("n_internacoes", 0))
-                mun_hp_counts = mun_keys
-
-            for i in range(municipios_df.height):
-                lat = lats[i]; lon = lons[i]; cod = cods[i]
-                if lat is None or lon is None:
-                    continue
-                # Distância Haversine real
-                lat1, lon1 = math.radians(hp.latitude), math.radians(hp.longitude)
-                lat2, lon2 = math.radians(float(lat)), math.radians(float(lon))
-                dlat = lat2 - lat1
-                dlon = lon2 - lon1
-                a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-                dist_km = 6371.0 * c
-                # Acha bucket (primeiro radius_km >= dist)
-                ridx = len(self._radii_km) - 1  # outermost default
-                for b_idx, r in enumerate(self._radii_km):
-                    if dist_km <= r:
-                        ridx = b_idx
-                        break
-                bucket = buckets[ridx]
-                try:
-                    bucket.populacao_total += float(pops[i])
-                except Exception:
-                    pass
-                mkey6 = cod[:6] if cod else ""
-                if mkey6 in mun_hp_counts:
-                    info = mun_hp_counts[mkey6]
-                    n_val = int(info["n"])
-                    bucket.n_internacoes += n_val
-                    bucket.valor_total += info["valor"]
-                    for k, v in info["grupos"].items():
-                        bucket.procedimentos_por_grupo[k] = bucket.procedimentos_por_grupo.get(k, 0) + v
-                    for k, v in info["formas"].items():
-                        bucket.procedimentos_por_forma[k] = bucket.procedimentos_por_forma.get(k, 0) + v
-                    for k, v in info["procs"].items():
-                        bucket.procedimentos_por_cod[k] = bucket.procedimentos_por_cod.get(k, 0) + v
-        self._buckets = buckets_per_hospital
-        # Auto escala max_rate
-        max_rate = 0.1
-        for bs in buckets_per_hospital.values():
-            for b in bs:
-                if b.taxa_por_1000 > max_rate:
-                    max_rate = b.taxa_por_1000
-        self._max_rate_display = max(max_rate * 1.2, 1.0)
+        # 4) escala da paleta pelo percentil 90 das taxas > 0 (o máximo isolado achatava tudo em verde)
+        taxas = sorted(b.taxa_por_1000 for bs in self._buckets.values() for b in bs if b.taxa_por_1000 > 0)
+        if taxas:
+            p90 = taxas[min(len(taxas) - 1, int(0.9 * (len(taxas) - 1)))]
+            self._max_rate_display = max(p90, 1.0)
+        else:
+            self._max_rate_display = 1.0
         self._reset_view()
         self._update_empty_visibility()
         self.update()
@@ -311,18 +340,21 @@ class ConcentricRingsMap(QWidget):
             self._zoom = 1.0; self._pan = QPointF(0, 0); return
         lats = [p.latitude for p in self._points]
         lons = [p.longitude for p in self._points]
-        pad_km = 2 * max(self._radii_km)
         cx_lat = sum(lats) / len(lats); cx_lon = sum(lons) / len(lons)
-        # ~ 80% widget width = 2*pad_km
         km_lat, km_lon = km_per_degree_lat(cx_lat)
-        deg_lon_span = 2.2 * pad_km / max(0.001, km_lon)
-        deg_lat_span = 2.2 * pad_km / max(0.001, km_lat)
-        # Desenhamos no rect do widget
+        # Extensão em km da caixa que contém TODOS os hospitais + o anel mais externo
+        r_out = max(self._radii_km)
+        span_x_km = (max(lons) - min(lons)) * km_lon + 2 * r_out
+        span_y_km = (max(lats) - min(lats)) * km_lat + 2 * r_out
         w = max(self.width(), 480); h = max(self.height(), 400)
-        zx = w / max(0.01, deg_lon_span)
-        zy = h / max(0.01, deg_lat_span)
-        self._zoom = min(zx, zy)
-        self._pan = QPointF(w / 2.0, h / 2.0)
+        # pixels por km que fazem a caixa caber com margem de 8%
+        zx = (w * 0.86) / max(1.0, span_x_km)
+        zy = (h * 0.86) / max(1.0, span_y_km)
+        self._zoom = max(0.05, min(zx, zy))
+        # Centro da CAIXA (não a média dos hospitais) no centro do widget: projeta com pan=0 e corrige
+        self._pan = QPointF(0.0, 0.0)
+        bx, by = self._proj((min(lats) + max(lats)) / 2.0, (min(lons) + max(lons)) / 2.0)
+        self._pan = QPointF(w / 2.0 - bx, h / 2.0 - by)
 
     # ------------------------------------------------------------------
     def _bucket_count_filtered(self, bucket: RingBucket | None) -> int:
@@ -422,6 +454,7 @@ class ConcentricRingsMap(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         self._draw_grid(p, w, h)
+        self._draw_municipios(p, w, h)
         for hp in self._points:
             buckets = self._buckets.get(hp.cnes, [])
             cx, cy = self._proj(hp.latitude, hp.longitude)
@@ -443,25 +476,32 @@ class ConcentricRingsMap(QWidget):
                 color = self._palette_color(t)
                 # Radial gradiente: transparente fora → cor forte no início do anel
                 in_rad_pix = (self._radii_km[i - 1] * px_per_km) if i > 0 else 0.0
+                if rad_pix < 1.0:
+                    continue
+                # Intensidade: anel com taxa alta é mais opaco; taxa zero fica quase transparente
+                a_fill = int(18 + 70 * t)
+                a_edge = int(70 + 150 * t)
                 rg = QRadialGradient(QPointF(cx, cy), rad_pix)
                 rg.setColorAt(0.0, QColor(0, 0, 0, 0))
                 rg.setColorAt(max(0.0, (in_rad_pix / rad_pix) - 1e-3), QColor(color.red(), color.green(), color.blue(), 0))
-                rg.setColorAt(min(1.0, (in_rad_pix / rad_pix) + 1e-3), color)
-                rg.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), max(0, color.alpha() - 120)))
+                rg.setColorAt(min(1.0, (in_rad_pix / rad_pix) + 1e-3), QColor(color.red(), color.green(), color.blue(), a_fill))
+                rg.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), max(0, a_fill - 10)))
                 rg.setSpread(QGradient.PadSpread)
                 p.setBrush(QBrush(rg))
                 p.setPen(Qt.NoPen)
                 rect = QRectF(cx - rad_pix, cy - rad_pix, 2 * rad_pix, 2 * rad_pix)
                 p.drawEllipse(rect)
-                # Contorno do anel cinza claro sutil
-                p.setPen(QPen(QColor(C_AXIS), 1, Qt.DashLine))
+                # Contorno do anel na cor da taxa
+                p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), a_edge), 1.2, Qt.DashLine))
                 p.setBrush(Qt.NoBrush)
                 p.drawEllipse(rect)
-                # Texto radius
-                p.setPen(QPen(QColor(C_TEXT_DIM)))
-                f = QFont("Segoe UI", 7); f.setBold(True); p.setFont(f)
-                p.drawText(QPointF(cx + rad_pix + 4, cy - 2), f"{r_km:.0f} km")
-        # 2) Desenha pins de hospitais (topo de tudo)
+                # Rótulo do raio só no hospital de maior volume (evita 125 textos sobrepostos)
+                if hp is self._points[0] and rad_pix > 14:
+                    p.setPen(QPen(QColor(C_TEXT_DIM)))
+                    f = QFont("Segoe UI", 7); f.setBold(True); p.setFont(f)
+                    p.drawText(QPointF(cx + rad_pix * 0.7071 + 3, cy - rad_pix * 0.7071 - 2), f"{r_km:.0f} km")
+        # 2) Desenha pins de hospitais (topo de tudo); rótulos só onde não colidem
+        drawn_labels: list[QRectF] = []
         for hp in self._points:
             cx, cy = self._proj(hp.latitude, hp.longitude)
             pin_r = max(5.0, min(14.0, 2 + math.sqrt(max(hp.leitos, 0.0)) / 3.5))
@@ -477,15 +517,56 @@ class ConcentricRingsMap(QWidget):
             p.drawEllipse(QPointF(cx, cy), pin_r, pin_r)
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(QPointF(cx, cy), pin_r + 4, pin_r + 4)
-            # Legenda
-            p.setPen(QPen(QColor(C_TEXT)))
-            f = QFont("Segoe UI", 8); p.setFont(f)
-            label = hp.nome if len(hp.nome) < 22 else hp.nome[:20] + "…"
-            p.drawText(QPointF(cx + pin_r + 7, cy + 3), f"{label} ({hp.cnes[-5:]})")
+            # Rótulo com fundo escuro (legível sobre os anéis)
+            f = QFont("Segoe UI", 8); f.setBold(True); p.setFont(f)
+            label = hp.nome if len(hp.nome) < 26 else hp.nome[:24] + "…"
+            txt = f"{label}"
+            fm = p.fontMetrics()
+            tw = fm.horizontalAdvance(txt); th = fm.height()
+            # tenta à direita, depois à esquerda, depois abaixo; se tudo colide, não rotula
+            candidatos = [
+                QRectF(cx + pin_r + 3, cy - th / 2.0 - 1, tw + 8, th + 2),
+                QRectF(cx - pin_r - 11 - tw, cy - th / 2.0 - 1, tw + 8, th + 2),
+                QRectF(cx - tw / 2.0 - 4, cy + pin_r + 4, tw + 8, th + 2),
+            ]
+            rect_lbl = None
+            for cand in candidatos:
+                if cand.left() < 0 or cand.right() > w or cand.top() < 0 or cand.bottom() > h:
+                    continue
+                if not any(cand.intersects(r) for r in drawn_labels):
+                    rect_lbl = cand
+                    break
+            if rect_lbl is not None:
+                drawn_labels.append(rect_lbl)
+                p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(11, 20, 22, 200)))
+                p.drawRoundedRect(rect_lbl, 4, 4)
+                p.setPen(QPen(QColor(C_TEXT)))
+                p.drawText(QPointF(rect_lbl.left() + 4, rect_lbl.bottom() - 1 - fm.descent()), txt)
         # 3) Legenda taxa
         self._draw_legend(p, w, h)
 
     # ------------------------------------------------------------------
+    def _draw_municipios(self, p: QPainter, w: int, h: int) -> None:
+        """Pontos dos municípios: tamanho ∝ √população; teal se enviam pacientes, cinza se não."""
+        if not self._mun_points:
+            return
+        p.setPen(Qt.NoPen)
+        for la, lo, po, n in self._mun_points:
+            px, py = self._proj(la, lo)
+            if px < -20 or py < -20 or px > w + 20 or py > h + 20:
+                continue
+            r = 2.0 + min(7.0, math.sqrt(max(po, 0.0)) / 90.0)
+            if n > 0:
+                p.setBrush(QBrush(QColor(45, 212, 191, 210)))
+                p.drawEllipse(QPointF(px, py), r, r)
+                p.setPen(QPen(QColor(230, 255, 250, 120), 0.8))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QPointF(px, py), r + 1.5, r + 1.5)
+                p.setPen(Qt.NoPen)
+            else:
+                p.setBrush(QBrush(QColor(148, 163, 184, 90)))
+                p.drawEllipse(QPointF(px, py), r, r)
+
     def _draw_grid(self, p: QPainter, w: int, h: int) -> None:
         pen = QPen(QColor(C_GRID)); pen.setStyle(Qt.DotLine); p.setPen(pen)
         step = 80
@@ -503,8 +584,11 @@ class ConcentricRingsMap(QWidget):
                    "para visualizar os anéis concêntricos de taxa.")
 
     def _draw_legend(self, p: QPainter, w: int, h: int) -> None:
-        # Barra vertical no canto inferior direito
-        x = w - 60; y = h - 230; bw = 22; bh = 200
+        # Barra vertical no canto superior direito, com fundo
+        bh = max(90, min(160, h - 90)); bw = 14
+        x = w - 70; y = 28
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(11, 20, 22, 170)))
+        p.drawRoundedRect(QRectF(x - 76, y - 22, 140, bh + 34), 6, 6)
         p.setPen(QPen(QColor(C_AXIS))); p.setBrush(Qt.NoBrush)
         p.drawRect(QRectF(x, y, bw, bh))
         # Gradiente
@@ -525,7 +609,16 @@ class ConcentricRingsMap(QWidget):
             p.setPen(QPen(QColor(C_TEXT)))
         # Título legenda
         f = QFont("Segoe UI", 8); f.setBold(True); p.setFont(f)
-        p.drawText(QPointF(x - 70, y - 6), "Taxa / 1.000 hab")
+        p.drawText(QPointF(x - 70, y - 8), "Taxa / 1.000 hab")
+        # Legenda dos pontos (canto inferior esquerdo)
+        f2 = QFont("Segoe UI", 8); p.setFont(f2)
+        ly = h - 16
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(45, 212, 191, 210)))
+        p.drawEllipse(QPointF(18, ly - 4), 4, 4)
+        p.setPen(QPen(QColor(C_TEXT))); p.drawText(QPointF(28, ly), "município que envia pacientes")
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(148, 163, 184, 120)))
+        p.drawEllipse(QPointF(218, ly - 4), 4, 4)
+        p.setPen(QPen(QColor(C_TEXT_DIM))); p.drawText(QPointF(228, ly), "demais municípios (tamanho = população)")
 
     # ------------------------------------------------------------------
     @staticmethod

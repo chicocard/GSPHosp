@@ -24,7 +24,9 @@ class Settings(BaseSettings):
     app_version: str = "2.0.0"
 
     data_dir: Path = Field(default_factory=lambda: Path.home() / ".gsphosp" / "data")
-    cache_dir: Path = Field(default_factory=lambda: Path(tempfile.gettempdir()) / "gsphosp")
+    # Cache de dados auxiliares (SIGTAP, CNES, municípios, DBC baixados). Fica no
+    # perfil do usuário: o %TEMP% do Windows é limpo periodicamente e apagava o SIGTAP.
+    cache_dir: Path = Field(default_factory=lambda: Path.home() / ".gsphosp" / "cache")
     output_dir: Path = Field(default_factory=lambda: Path.cwd() / "output")
     log_dir: Path = Field(default_factory=lambda: Path.home() / ".gsphosp" / "logs")
 

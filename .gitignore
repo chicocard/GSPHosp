@@ -21,6 +21,8 @@ env/
 
 # Dados e logs
 *.parquet
+# exceção: municípios IBGE embarcados no pacote (65 KB, 5.571 linhas)
+!papahr/data/counties.parquet
 *.csv
 *.dbc
 *.dbf

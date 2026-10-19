@@ -13,6 +13,7 @@ import io
 import os
 import sys
 import traceback
+from pathlib import Path
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -268,6 +269,179 @@ def main() -> int:
                          f"added={1 if bate else 0} invalid={[] if bate else ['2219646']}")
         except Exception as e:
             registra("15-fallback", FAIL, f"excecao: {e}")
+
+
+    # ---------------------------------------------------------------- Teste 0b:
+    # Lint de erros reais (sintaxe, nomes indefinidos, import inexistente).
+    # Só regras que indicam código quebrado; estilo não entra aqui.
+    try:
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", "papahr", "--select", "E9,F63,F7,F82,F821",
+             "--output-format", "concise", "--no-cache"],
+            cwd=BASE, capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode == 0:
+            registra("0b-ruff", PASS, "ruff: 0 erros de sintaxe/nome indefinido em papahr/")
+        else:
+            linhas = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+            registra("0b-ruff", FAIL, f"{len(linhas)} ocorrencia(s): " + " | ".join(linhas[:5]))
+    except FileNotFoundError:
+        registra("0b-ruff", SKIP, "ruff nao instalado (pip install ruff)")
+    except Exception as e:
+        registra("0b-ruff", SKIP, f"ruff indisponivel: {type(e).__name__}: {e}")
+
+    # ---------------------------------------------------------------- Teste 16:
+    # INTEGRACAO REAL: 1 DBC pequeno (SIH-RD AC 2025-01, ~323 KB) -> pipeline
+    # completo (DBC -> processador -> SIGTAP FTP -> IBGE -> CNES) -> dashboard.
+    # Este e o teste que faltava: as suites anteriores passavam 100% com o
+    # dashboard vazio porque nunca exercitavam o caminho real.
+    # Sem rede: SKIP (nunca FAIL por ambiente), mas o motivo fica registrado.
+    try:
+        import shutil
+        import tempfile
+        import polars as pl
+        from papahr.config import get_settings
+        from papahr.core.ftp_client import FTPClient
+        from papahr.pipelines import run_pipeline
+        from papahr.security import PipelineRequest
+        from papahr.dashboard import compute_dashboard
+
+        st = get_settings()
+        cache_dbc = st.cache_dir / "SIH-RD" / "_teste_integracao"
+        cache_dbc.mkdir(parents=True, exist_ok=True)
+        dbc_path = cache_dbc / "RDAC2501.dbc"
+        if not dbc_path.exists() or dbc_path.stat().st_size < 100_000:
+            url = "ftp://ftp.datasus.gov.br/dissemin/publicos/SIHSUS/200801_/Dados/RDAC2501.dbc"
+            try:
+                FTPClient().download_ftp(url, dbc_path)
+            except Exception as e_dl:
+                raise RuntimeError(f"sem rede/FTP para baixar RDAC2501.dbc: {e_dl}") from e_dl
+
+        # Pipeline LOCAL numa pasta isolada (so este arquivo) e output em pasta temporaria
+        work = Path(tempfile.mkdtemp(prefix="gsphosp_it_"))
+        try:
+            shutil.copy2(dbc_path, work / "RDAC2501.dbc")
+            out_dir_bak = st.output_dir
+            st.output_dir = work / "out"
+            try:
+                req = PipelineRequest(information_system="SIH-RD", state_abbr="AC",
+                                      dbc_dir_path=work, save_csv=True, save_parquet=True)
+                res = run_pipeline(req)
+            finally:
+                st.output_dir = out_dir_bak
+            df = res.df
+            problemas: list[str] = []
+            if res.rows <= 0 or df.is_empty():
+                problemas.append(f"rows={res.rows}")
+            if "CNES" not in df.columns or not bool((df["CNES"].cast(pl.Utf8).str.len_chars() == 7).all()):
+                problemas.append("CNES ausente ou nao tem 7 digitos")
+            for col_req in ("DIAG_PRINC", "QT_DIARIAS", "MUNIC_RES", "VAL_TOT", "ANO_CMPT"):
+                if col_req not in df.columns:
+                    problemas.append(f"coluna analitica ausente: {col_req}")
+
+            def _pct_preenchido(col: str) -> float:
+                if col not in df.columns:
+                    return 0.0
+                sc = df[col].cast(pl.Utf8)
+                return 100.0 * float((sc.is_not_null() & (sc != "")).sum()) / max(1, df.height)
+
+            p_proc = _pct_preenchido("Procedimentos realizados")
+            p_mun = _pct_preenchido("Municipio de Residencia")
+            p_cid = _pct_preenchido("Nome da Mobirdade (CID)")
+            if p_proc < 90:
+                problemas.append(f"SIGTAP nome procedimento preenchido {p_proc:.0f}% (<90%)")
+            if p_mun < 90:
+                problemas.append(f"IBGE municipio residencia preenchido {p_mun:.0f}% (<90%)")
+            if res.output_csv is None or not Path(res.output_csv).exists():
+                problemas.append("CSV de exportacao nao gerado")
+            else:
+                n_csv = pl.read_csv(res.output_csv, separator=";", n_rows=1).width
+                if n_csv >= df.width:
+                    problemas.append(f"CSV deveria ter so colunas de exportacao ({n_csv} vs {df.width})")
+
+            m = compute_dashboard(df, system_kind="SIH_RD", compute_huff=True)
+            vazios = [k for k in ("estratificacao_risco", "eficiencia_clinica", "integracao_territorial",
+                                  "icsap_por_condicao", "benchmarking", "serie_temporal",
+                                  "transicao_cuidado", "distance_decay")
+                      if getattr(m, k) is None or getattr(m, k).is_empty()]
+            if vazios:
+                problemas.append("quadros do dashboard vazios: " + ",".join(vazios))
+            if m.huff is None:
+                problemas.append("modelo de Huff nao calculado")
+
+            detalhe = (f"rows={res.rows} cols={df.width} proc={p_proc:.0f}% cid={p_cid:.0f}% "
+                       f"mun={p_mun:.0f}% huff={'OK' if m.huff is not None else 'NAO'} "
+                       f"decay={m.distance_decay.shape[0]} alertas={len(m.alerts)}")
+            if problemas:
+                registra("16-integracao-real", FAIL, detalhe + " | " + "; ".join(problemas))
+            else:
+                registra("16-integracao-real", PASS, detalhe)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    except RuntimeError as e:
+        registra("16-integracao-real", SKIP, str(e))
+    except Exception as e:
+        registra("16-integracao-real", FAIL, f"excecao: {type(e).__name__}: {e}")
+
+
+    # ---------------------------------------------------------------- Teste 17:
+    # DASHBOARD HEADLESS: renderiza a DashboardPage offscreen com o ultimo Parquet
+    # analitico e exige: 0 excecoes nos _fill_tab_*, graficos com itens desenhados,
+    # mapa com hospitais georreferenciados e aneis populados, e largura minima da
+    # pagina <= 1366 px (layout cabe em notebook comum).
+    try:
+        import os as _os
+        import polars as pl
+        pq = Path(BASE) / "output" / "outputSIH_RD.parquet"
+        if not pq.exists():
+            raise RuntimeError("output/outputSIH_RD.parquet ausente (rode o pipeline antes)")
+        _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        _os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QFont
+        app = QApplication.instance() or QApplication([])
+        app.setFont(QFont("Segoe UI", 10))
+        from papahr.ui.pages.dashboard_page import DashboardPage
+        from papahr.dashboard import compute_dashboard
+        df = pl.read_parquet(pq)
+        page = DashboardPage(); page.resize(1366, 768); page.show(); app.processEvents()
+        page._last_df = df; page._last_system = "SIH_RD"; page._last_cnes = None
+        m = compute_dashboard(df, system_kind="SIH_RD", compute_huff=True)
+        page._metrics = m
+        import io as _io, contextlib
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            page._on_ready(m)
+            for _ in range(10):
+                app.processEvents()
+        excecoes = buf.getvalue().count("[!!!] EXCECAO")
+        problemas = []
+        if excecoes:
+            problemas.append(f"{excecoes} excecao(oes) em _fill_tab_*")
+        for nome in ("plot_estratos", "plot_los", "plot_icsap", "plot_ts", "plot_bench_bar", "plot_distance_decay"):
+            pw = getattr(page, nome, None)
+            n_items = len(pw.getPlotItem().items) if pw is not None and hasattr(pw, "getPlotItem") else 0
+            if n_items == 0:
+                problemas.append(f"{nome} sem itens")
+        mp = page.concentric_map
+        n_pts = len(mp._points)
+        n_buck = sum(1 for bs in mp._buckets.values() for b in bs if b.populacao_total > 0)
+        if n_pts == 0:
+            problemas.append("mapa sem hospitais")
+        if n_buck == 0:
+            problemas.append("mapa sem aneis populados")
+        minw = page.minimumSizeHint().width()
+        if minw > 1366:
+            problemas.append(f"largura minima {minw}px > 1366")
+        detalhe = (f"excecoes={excecoes} mapa_hospitais={n_pts} aneis_populados={n_buck} "
+                   f"min_largura={minw}px tabs={page.tabs.count()}")
+        registra("17-dashboard-headless", FAIL if problemas else PASS,
+                 detalhe + (" | " + "; ".join(problemas) if problemas else ""))
+    except RuntimeError as e:
+        registra("17-dashboard-headless", SKIP, str(e))
+    except Exception as e:
+        registra("17-dashboard-headless", FAIL, f"excecao: {type(e).__name__}: {e}")
 
     # ---------------------------------------------------------------- Resumo
     log()

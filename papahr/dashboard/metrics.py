@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import polars as pl
 
@@ -238,6 +238,7 @@ class DashboardMetrics:
     glosas_causas: pl.DataFrame = field(default_factory=pl.DataFrame)
     glosas_serie_temporal: pl.DataFrame = field(default_factory=pl.DataFrame)
     alerts: list[str] = field(default_factory=list)
+    lace_ausentes: list[str] = field(default_factory=list)
     cnes_sel: list[str] | None = None
 
 
@@ -278,6 +279,13 @@ def compute_dashboard(
                     f"Aviso: O filtro por {len(cnes_str_set)} CNES selecionado(s) não coincidiu com os CNES do dataset de produção. Exibindo todos os hospitais do dataset."
                 )
 
+    # Contrato de colunas: explica POR QUE uma aba ficaria vazia (sem dado sintético)
+    try:
+        from papahr.dashboard.contract import contract_alerts
+        m.alerts.extend(contract_alerts(prod, system_kind))
+    except Exception as _exc:  # noqa: BLE001
+        log.warning("Validacao do contrato de colunas falhou: %s", _exc)
+
     # Dados CNES
     from papahr.dashboard.cnes_loader import get_cnes_data
     cnes = get_cnes_data().load()
@@ -289,6 +297,23 @@ def compute_dashboard(
 
     # 2. Estratificação de risco
     m.estratificacao_risco = _estrato_risco_hospital(prod)
+    # Sem as colunas do escore LACE a estratificação degenera em 100% 'BAIXO'.
+    # Isso deve ser avisado explicitamente, nunca apresentado como risco baixo real.
+    m.lace_ausentes = _lace_colunas_ausentes(prod)
+    if m.lace_ausentes:
+        if len(m.lace_ausentes) == 5:
+            m.alerts.append(
+                "Estratificação de risco LACE INDISPONÍVEL: o dataset não possui nenhuma das colunas "
+                "de escore (permanência, acuidade, comorbidades, visitas ao PS, CID principal). Todos "
+                "os casos recebem score 0 e caem em 'BAIXO' — isto significa risco NÃO MENSURÁVEL, "
+                "não risco baixo real."
+            )
+        else:
+            m.alerts.append(
+                "Estratificação de risco LACE PARCIAL — colunas ausentes: "
+                + ", ".join(m.lace_ausentes)
+                + ". Os escores estão subestimados e a classe 'BAIXO' concentra os casos."
+            )
 
     # 3. Eficiência clínica
     m.eficiencia_clinica = _eficiencia_clinica(prod)
@@ -308,7 +333,15 @@ def compute_dashboard(
 
     # 8. Modelo Gravitacional Huff
     if compute_huff and not cnes_df.is_empty() and not cnes.municipios.is_empty():
-        m.huff = _roda_huff(cnes_df, cnes.municipios, system_kind, beta)
+        try:
+            _mp = prod.group_by("_cnes").len()
+            massa_prod = {
+                str(k).strip().zfill(7): float(v)
+                for k, v in zip(_mp["_cnes"].to_list(), _mp["len"].to_list()) if k is not None
+            }
+        except Exception:  # noqa: BLE001
+            massa_prod = {}
+        m.huff = _roda_huff(cnes_df, cnes.municipios, system_kind, beta, massa_prod)
 
     # 8.5. Benchmarking (hospital vs outros do município / micro / macro / UF)
     m.benchmarking = _build_benchmarking(
@@ -444,6 +477,24 @@ def _find_col_by_keyword(cols: list[str], keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def _lace_colunas_ausentes(prod: pl.DataFrame) -> list[str]:
+    """Colunas que faltam no dataset para o escore LACE (lista vazia = escore completo).
+
+    Sem estas colunas todo caso recebe score 0 e cai em 'BAIXO' — o que NÃO é uma
+    medida de risco baixo, é ausência de dado. O dashboard precisa sinalizar isso.
+    """
+    col_los, col_acuity, col_ch, col_ed = _strata_lace_lookup(list(prod.columns))
+    col_cid = _find_col(prod, ("DIAG_PRINC", "CID_PRINCIPAL", "DIAGNOSTICO_PRINCIPAL", "CID"))
+    pares = (
+        ("permanência (DIAS_PERM/QT_DIARIAS)", col_los),
+        ("acuidade/caráter da internação", col_acuity),
+        ("comorbidades (Charlson)", col_ch),
+        ("visitas ao PS em 6 meses", col_ed),
+        ("CID principal", col_cid),
+    )
+    return [nome for nome, col in pares if not col]
+
+
 def _estrato_risco_hospital(prod: pl.DataFrame) -> pl.DataFrame:
     """Estratifica risco LACE (ou heurístico baseado em Charlson/LOS/ICSAP)."""
     cols = list(prod.columns)
@@ -542,7 +593,12 @@ def _eficiencia_clinica(prod: pl.DataFrame) -> pl.DataFrame:
         "vl_total_apresentado", "VAL_SH", "VAL_SP"
     ))
     rows = prod.select([c for c in (cnes_col, cid_col, los_col, val_col) if c]).to_dicts()
-    agg: dict[str, dict[str, float]] = {}
+    # 1ª passada: classifica cada episódio e acumula a média OBSERVADA por linha de cuidado.
+    # Linhas sem benchmark externo (ex.: "Outros", a maioria dos casos) usam a média do
+    # próprio conjunto como esperado — antes entravam com esperado 0 e o O/E explodia
+    # (341× para uma maternidade), o que não é um indicador, é um artefato.
+    episodios: list[tuple[str, str, float, float, str]] = []
+    soma_linha: dict[str, list[float]] = {}
     for r in rows:
         cnes = str(r.get(cnes_col, ""))
         cid = str(r.get(cid_col or "__", ""))
@@ -554,14 +610,23 @@ def _eficiencia_clinica(prod: pl.DataFrame) -> pl.DataFrame:
             val = float(str(r.get(val_col, 0) or 0).replace(',', '.')) if val_col else 0.0
         except ValueError:
             val = 0.0
+        los = max(0.0, los); val = max(0.0, val)
+        linha = _categoria_linha(cid)
+        episodios.append((cnes, cid, los, val, linha))
+        acc = soma_linha.setdefault(linha, [0.0, 0.0, 0.0])  # n, los, val
+        acc[0] += 1; acc[1] += los; acc[2] += val
+    media_los_linha = {k: (v[1] / v[0] if v[0] else 0.0) for k, v in soma_linha.items()}
+    media_val_linha = {k: (v[2] / v[0] if v[0] else 0.0) for k, v in soma_linha.items()}
+    # 2ª passada: agrega por hospital com esperado = benchmark externo OU média interna da linha
+    agg: dict[str, dict[str, float]] = {}
+    for cnes, cid, los, val, linha in episodios:
         bucket = agg.setdefault(cnes, {"n": 0.0, "los_sum": 0.0, "val_sum": 0.0,
                                         "los_esperado_sum": 0.0, "custo_esperado_sum": 0.0, "drg_weight_sum": 0.0})
-        linha = _categoria_linha(cid)
         bucket["n"] += 1
-        bucket["los_sum"] += max(0.0, los)
-        bucket["val_sum"] += max(0.0, val)
-        bucket["los_esperado_sum"] += LOS_BENCHMARK.get(linha, 0.0)
-        bucket["custo_esperado_sum"] += CUSTO_BENCHMARK.get(linha, 0.0)
+        bucket["los_sum"] += los
+        bucket["val_sum"] += val
+        bucket["los_esperado_sum"] += LOS_BENCHMARK.get(linha) or media_los_linha.get(linha, 0.0)
+        bucket["custo_esperado_sum"] += CUSTO_BENCHMARK.get(linha) or media_val_linha.get(linha, 0.0)
         bucket["drg_weight_sum"] += _get_drg_weight(cid)
     if not agg:
         return pl.DataFrame()
@@ -784,28 +849,59 @@ def _serie_temporal(prod: pl.DataFrame) -> pl.DataFrame:
     return agg
 
 
+# Especialidade do leito na AIH (campo ESPEC do SIH-RD) — nomes oficiais do SIHD
+ESPEC_SIH: dict[str, str] = {
+    "01": "Cirurgia", "02": "Obstetrícia", "03": "Clínica médica", "04": "Crônicos",
+    "05": "Psiquiatria", "06": "Pneumologia sanitária (tisiologia)", "07": "Pediatria",
+    "08": "Reabilitação", "09": "Psiquiatria (hospital-dia)", "10": "Cirurgia (hospital-dia)",
+    "11": "Geriatria (hospital-dia)", "12": "Saúde mental (hospital-dia)", "13": "AIDS (hospital-dia)",
+    "14": "Intercorrência pós-transplante (hospital-dia)", "64": "Cuidados prolongados",
+    "87": "Saúde mental (clínico)", "88": "Queimados", "89": "Atenção domiciliar",
+}
+
+
 def _top10(prod: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
-    proc_col = _find_col(prod, ("PROC_REA", "PA_PROC_ID", "PA_CODPRO", "PA_PROC", "PROC_SOL", "COD_PROC",
-                                 "NO_PROCEDIMENTO", "CO_PROCEDIMENTO", "procedimento", "procedimento_realizado"))
-    esp_col = _find_col(prod, ("NO_ESPECIALIDADE", "ESPECIALIDADE", "CO_ESPECIALIDADE", "ESPECIAL",
+    """Top-10 procedimentos e especialidades, com NOME quando a coluna existe (SIGTAP/CBO)."""
+    # Procedimento: prefere a coluna já enriquecida com nome (código-nome), senão o código
+    proc_col = _find_col(prod, ("Procedimentos realizados", "NO_PROCEDIMENTO",
+                                 "PROC_REA", "PA_PROC_ID", "PA_CODPRO", "PA_PROC", "PROC_SOL", "COD_PROC",
+                                 "CO_PROCEDIMENTO", "procedimento", "procedimento_realizado"))
+    esp_col = _find_col(prod, ("NO_ESPECIALIDADE", "ESPECIALIDADE", "Profissional-CBO", "NO_OCUPACAO",
+                                "ESPEC", "CO_ESPECIALIDADE", "ESPECIAL",
                                 "PA_CBOCOD", "PA_CBO", "CBO", "COD_CBO", "ocupacao", "especialidade_medica"))
-    def _top(col: str | None) -> pl.DataFrame:
+
+    def _top(col: str | None, nome_item: str) -> pl.DataFrame:
         if col is None:
             return pl.DataFrame()
-        t = prod.group_by(col).agg(pl.count().alias("n")).sort("n", descending=True).head(10)
-        t.columns = ["item", "n"]
+        t = (prod.group_by(col).agg(pl.len().alias("n")).sort("n", descending=True).head(10))
+        t = t.with_columns(pl.col(col).cast(pl.Utf8, strict=False).fill_null("").alias(col))
+        if col == "ESPEC":
+            t = t.with_columns(
+                pl.col(col).str.zfill(2).map_elements(
+                    lambda c: f"{c} - {ESPEC_SIH.get(c, 'Especialidade ' + c)}", return_dtype=pl.Utf8
+                ).alias(col)
+            )
+        total = float(prod.height or 1)
+        t = t.with_columns((pl.col("n") * 100.0 / total).round(1).alias("% do total"))
+        t.columns = [nome_item, "n", "% do total"]
         return t
-    return _top(proc_col), _top(esp_col)
+
+    return _top(proc_col, "Procedimento"), _top(esp_col, "Especialidade")
 
 
 # ---------------------------------------------------------------------------
 # Huff (geografia)
 # ---------------------------------------------------------------------------
 def _roda_huff(cnes_df: pl.DataFrame, municipios: pl.DataFrame,
-               system_kind: str, beta: float | None) -> HuffResult | None:
+               system_kind: str, beta: float | None,
+               massa_producao: dict[str, float] | None = None) -> HuffResult | None:
+    """Modelo de Huff. Massa do hospital = leitos (CNES) quando disponível; caso
+    contrário usa a PRODUÇÃO observada no próprio dataset (nº de AIH/APAC por CNES),
+    que é uma medida real de atratividade — nunca um valor sintético fixo."""
     # Beta escolhido por sistema
     if beta is None:
         beta = BETA_AMBULATORIAL if system_kind == "SIA_PA" else BETA_MEDIA
+    massa_producao = massa_producao or {}
 
     lat_e = "NU_LATITUDE" if "NU_LATITUDE" in cnes_df.columns else None
     lon_e = "NU_LONGITUDE" if "NU_LONGITUDE" in cnes_df.columns else None
@@ -836,7 +932,9 @@ def _roda_huff(cnes_df: pl.DataFrame, municipios: pl.DataFrame,
             continue
         massa = float(h.get(leitos_col, 0) or 0) if leitos_col else 0.0
         if massa <= 0:
-            massa = 0.0  # fallback default eliminado para cumprir integridade de dados
+            massa = float(massa_producao.get(str(h.get("CO_CNES", "")).strip().zfill(7), 0.0) or 0.0)
+        if massa <= 0:
+            continue  # sem leitos e sem produção: hospital não entra no modelo
         hosp_nodes.append(HospitalNode(
             cnes=str(h.get("CO_CNES", "")),
             nome=str(h.get("NO_FANTASIA", h.get("CO_CNES", ""))),
@@ -856,11 +954,12 @@ def _roda_huff(cnes_df: pl.DataFrame, municipios: pl.DataFrame,
     if not (lat_m and lon_m and mun_cod_col):
         # Sem coords em municipios: usa hospitais vizinhos dentro raio 50km (skip Huff)
         return None
-    mun_dicts = municipios.select([mun_cod_col, lat_m, lon_m,
-                                    "NO_MUNICIPIO" if "NO_MUNICIPIO" in municipios.columns else mun_cod_col,
-                                    "NU_POPULACAO" if "NU_POPULACAO" in municipios.columns else mun_cod_col,
-                                    "SIGLA_ESTADO" if "SIGLA_ESTADO" in municipios.columns else mun_cod_col,
-                                    ]).to_dicts()
+    uf_col_m = next((c for c in ("SIGLA_ESTADO", "CO_SIGLA_ESTADO", "SG_UF") if c in municipios.columns), None)
+    sel_cols = [mun_cod_col, lat_m, lon_m]
+    for c in ("NO_MUNICIPIO", "NU_POPULACAO", uf_col_m):
+        if c and c in municipios.columns and c not in sel_cols:
+            sel_cols.append(c)
+    mun_dicts = municipios.select(sel_cols).to_dicts()
     mun_nodes: list[MunicipioNode] = []
     for m in mun_dicts:
         try:
@@ -877,7 +976,7 @@ def _roda_huff(cnes_df: pl.DataFrame, municipios: pl.DataFrame,
             cod_ibge=str(m.get(mun_cod_col, "")),
             nome=str(m.get("NO_MUNICIPIO", m.get(mun_cod_col, ""))),
             latitude=lat, longitude=lon, populacao=pop,
-            uf=str(m.get("SIGLA_ESTADO", "")),
+            uf=str(m.get(uf_col_m, "") if uf_col_m else ""),
         ))
     if not mun_nodes:
         return None
@@ -1037,7 +1136,7 @@ def _build_benchmarking(
         cnes_col_e = next((c for c in ("hospital_cnes", "_cnes", "cnes", "CNES") if c in eficiencia.columns), None)
         if cnes_col_e:
             cols_ef = [c for c in eficiencia.columns
-                       if c == cnes_col_e or c.lower() in ("los_medio", "los_medio_dias", "los_o_e", "custo_o_e", "custo_oe")]
+                       if c == cnes_col_e or c.lower() in ("los_medio", "los_medio_dias", "los_obs_med", "los_o_e", "custo_o_e", "custo_oe", "case_mix_index")]
             if len(cols_ef) > 1:
                 e_j = eficiencia.select(cols_ef)
                 if cnes_col_e != "hospital_cnes":
@@ -1048,6 +1147,20 @@ def _build_benchmarking(
                 base = base.join(e_j, on="hospital_cnes", how="left")
                 if "los_medio_dias" not in base.columns and "los_medio" in base.columns:
                     base = base.rename({"los_medio": "los_medio_dias"})
+                if "los_obs_med" in base.columns:
+                    if "los_medio_dias" in base.columns:
+                        base = base.with_columns(
+                            pl.coalesce([pl.col("los_medio_dias"), pl.col("los_obs_med")]).alias("los_medio_dias")
+                        ).drop("los_obs_med")
+                    else:
+                        base = base.rename({"los_obs_med": "los_medio_dias"})
+                if "case_mix_index" in base.columns:
+                    if "cmi" in base.columns:
+                        base = base.with_columns(
+                            pl.coalesce([pl.col("cmi"), pl.col("case_mix_index")]).alias("cmi")
+                        ).drop("case_mix_index")
+                    else:
+                        base = base.rename({"case_mix_index": "cmi"})
                 if "custo_oe" not in base.columns and "custo_o_e" in base.columns:
                     base = base.rename({"custo_o_e": "custo_oe"})
 
@@ -1174,7 +1287,8 @@ def _build_distance_decay(
         return pl.DataFrame()
     col_cnes = _find_col(prod, ("_cnes", "cnes"))
     col_muni = _find_col(prod, ("municipio_paciente", "CO_MUNICIPIO", "COD_MUNICIPIO",
-                                 "municipio_ibge", "CO_MUNICIPIO_RES", "MUNIC_RES"))
+                                 "municipio_ibge", "CO_MUNICIPIO_RES", "MUNIC_RES",
+                                 "PA_MUNPCN", "SP_M_PAC"))
     if col_cnes is None or col_muni is None:
         # fallback: usar huff od_matrix se existir
         if huff is None or huff.od_matrix.is_empty():
@@ -1220,9 +1334,11 @@ def _build_distance_decay(
 
     # 3. Conta internações (hospital_cnes × muni_origem) do dataset
     # normaliza coluna município do dataset (garante 6 dígitos, sem DV)
-    def _norm6(x: str) -> str:
-        s = str(x or "").strip().zfill(7)[:6]
-        return s
+    def _norm6(x: str) -> str | None:
+        d = "".join(ch for ch in str(x or "") if ch.isdigit())
+        if len(d) >= 7:                      # 7 dígitos: "0120020" (zfill) ou "1200203" (com DV)
+            d = d[1:7] if d.startswith("0") else d[:6]
+        return d if len(d) == 6 else None
 
     contagem = prod.with_columns([
         pl.col(col_cnes).cast(pl.Utf8, strict=False).alias("hospital_cnes"),

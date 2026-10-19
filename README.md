@@ -39,7 +39,8 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# Baixa dados auxiliares (counties, CNES, SIGTAP)
+# (Opcional) Pré-baixa dados auxiliares. Municípios IBGE já vêm embarcados;
+# SIGTAP é baixado do FTP do DATASUS automaticamente na 1ª execução.
 papahr-cli prepare-aux --all
 
 # GUI
@@ -136,3 +137,38 @@ ruff format papahr tests          # formatter
 mypy papahr                       # tipagem
 pytest tests -q --cov=papahr     # testes + cobertura
 ```
+
+## Arquitetura de dados (importante para o Dashboard)
+
+O pipeline devolve **um único DataFrame analítico** por execução:
+
+- **Colunas de exportação** com rótulos legíveis (layout do pacote R: `Valor Total`,
+  `Procedimentos realizados`, `Municipio de Residencia`, ...). São as únicas que vão
+  para o **CSV/XLSX**.
+- **Colunas analíticas** com os nomes originais dos microdados e do enriquecimento
+  (`CNES` normalizado em 7 dígitos, `DIAG_PRINC`, `QT_DIARIAS`, `DT_INTER`, `DT_SAIDA`,
+  `MUNIC_RES`, `VAL_TOT`, `ANO_CMPT`, ...). São consumidas pelo **Dashboard**, pelo
+  **DuckDB** (bronze → silver → gold) e gravadas no **Parquet**.
+
+Quando uma aba do dashboard não tem a coluna de que precisa, o contrato em
+`papahr/dashboard/contract.py` gera um alerta dizendo exatamente o que falta.
+
+## Fontes auxiliares
+
+| Fonte | Origem | Observação |
+|---|---|---|
+| Municípios IBGE | embarcado em `papahr/data/counties.parquet` (5.571) | atualizável com `prepare-aux --download-counties` |
+| SIGTAP | FTP `ftp2.datasus.gov.br/pub/sistemas/tup/downloads/` | nome atual `TabelaUnificada_AAAAMM_vNNNN.zip`; competência sem ZIP usa alias da anterior |
+| CNES | CSV local (`C:\DICIONARIO_DADOS\BASE_DE_DADOS_CNES_*`) ou pasta informada no Wizard | centroides municipais derivados das coordenadas dos estabelecimentos |
+| Microdados SIA/SIH | FTP `ftp.datasus.gov.br` | leitor DBC em Python puro (sem DLL) |
+
+Cache de tudo isso: `%USERPROFILE%\.gsphosp\cache` (não usa mais `%TEMP%`).
+
+## Testes
+
+```powershell
+.\.venv\Scripts\python.exe Testar-GSPHosp.py   # 18 testes, inclui integração real (1 DBC + SIGTAP + IBGE + dashboard)
+.\.venv\Scripts\python.exe -m pytest tests    # unitários
+```
+
+`python -m papahr` abre a GUI; `python -m papahr --help` (ou qualquer argumento) usa o CLI.

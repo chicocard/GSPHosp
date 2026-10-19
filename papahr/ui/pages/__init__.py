@@ -5,6 +5,7 @@ from datetime import date
 from functools import partial
 from pathlib import Path
 from typing import Optional
+import os
 import sys
 import traceback
 import polars as pl
@@ -63,6 +64,7 @@ from papahr.ui.widgets import (
     AnimatedProgress,
     CardWidget,
     ConcentricRingsMap,
+    DeferredSplitter,
     HospitalMapPoint,
     KpiCard,
     StatusBadge,
@@ -402,7 +404,7 @@ class PipelinePage(QWidget):
     # ================================================================== UI
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
+        root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
         # Container principal com scroll para caber em qualquer resolução sem sobreposição
@@ -1129,7 +1131,7 @@ class PipelinePage(QWidget):
     def _refresh_geo_cascate(self) -> None:
         try:
             ufs_sel = self._selected_ufs_nonempty()
-            print(f"[DEBUG] _refresh_geo_cascate START | UFs marcadas = {sorted(ufs_sel)}", file=sys.stderr, flush=True)
+            log.debug(f"_refresh_geo_cascate START | UFs marcadas = {sorted(ufs_sel)}")
             # --- Nível 2: macrorregiões ---
             while self._macro_flow.count():
                 it = self._macro_flow.takeAt(0); wid = it.widget()
@@ -1158,10 +1160,10 @@ class PipelinePage(QWidget):
                 self.lbl_macro_hint.setStyleSheet("color:#495F5E;font-style:italic;")
             # Atualiza DRS
             self._refresh_drs()
-            print(f"[DEBUG] _refresh_geo_cascate OK | N Macros={len(macros_sorted)}  N chips_drs={len(self.chips_drs)}", file=sys.stderr, flush=True)
+            log.debug(f"_refresh_geo_cascate OK | N Macros={len(macros_sorted)}  N chips_drs={len(self.chips_drs)}")
         except Exception as e:
             tb = traceback.format_exc()
-            print(f"[DEBUG] _refresh_geo_cascate FALHOU:\n{tb}", file=sys.stderr, flush=True)
+            log.debug(f"_refresh_geo_cascate FALHOU:\n{tb}")
             try:
                 QMessageBox.warning(self, "Erro no recorte geográfico", f"{e}\n\n{tb[:3500]}")
             except Exception:
@@ -1171,7 +1173,7 @@ class PipelinePage(QWidget):
         try:
             ufs_sel = self._selected_ufs_nonempty()
             macros_sel = self._selected_macros_nonempty()
-            print(f"[DEBUG] _refresh_drs START | UFs={sorted(ufs_sel)}  Macros={sorted(macros_sel)}", file=sys.stderr, flush=True)
+            log.debug(f"_refresh_drs START | UFs={sorted(ufs_sel)}  Macros={sorted(macros_sel)}")
             while self._drs_flow.count():
                 it = self._drs_flow.takeAt(0); wid = it.widget()
                 if wid: wid.deleteLater()
@@ -1198,10 +1200,10 @@ class PipelinePage(QWidget):
             else:
                 self.lbl_drs_hint.setText("⬅ Selecione UFs (e opcionalmente macrorregiões) para ver as DRS.")
                 self.lbl_drs_hint.setStyleSheet("color:#495F5E;font-style:italic;")
-            print(f"[DEBUG] _refresh_drs OK | N DRS chips={len(drs_sorted)}", file=sys.stderr, flush=True)
+            log.debug(f"_refresh_drs OK | N DRS chips={len(drs_sorted)}")
         except Exception as e:
             tb = traceback.format_exc()
-            print(f"[DEBUG] _refresh_drs FALHOU:\n{tb}", file=sys.stderr, flush=True)
+            log.debug(f"_refresh_drs FALHOU:\n{tb}")
             try:
                 QMessageBox.warning(self, "Erro no recorte geográfico (DRS)", f"{e}\n\n{tb[:3500]}")
             except Exception:
@@ -1901,7 +1903,7 @@ class PipelinePage(QWidget):
         errors: list[str] = []
         warnings: list[str] = []
         using_source: str = "CNES local"
-        print(f"[DEBUG] _reload_hospitals_from_cnes START | apply_geo_filter={apply_geo_filter} sel_ufs={sorted(sel_ufs)} sel_macros={sorted(sel_macros_pre)} sel_drs={sorted(sel_drs_pre)}", file=sys.stderr, flush=True)
+        log.debug(f"_reload_hospitals_from_cnes START | apply_geo_filter={apply_geo_filter} sel_ufs={sorted(sel_ufs)} sel_macros={sorted(sel_macros_pre)} sel_drs={sorted(sel_drs_pre)}")
 
         # ╔══════════════════════════════════════════════════════════════════╗
         # ║  🚨 CORREÇÃO FINAL: Try/Catch SEPARADO POR HEURÍSTICA.          ║
@@ -1918,7 +1920,7 @@ class PipelinePage(QWidget):
         except Exception as exc_ldb:  # pragma: no cover - DuckDB lockado/rota corrompida
             tb = traceback.format_exc()
             errors.append(f"(DuckDB não abriu: {exc_ldb})")
-            print(f"[DEBUG] Heuristica1 FALHOU em get_db():\n{tb}", file=sys.stderr, flush=True)
+            log.debug(f"Heuristica1 FALHOU em get_db():\n{tb}")
             db = None
         if db is not None:
             try:
@@ -1968,7 +1970,7 @@ class PipelinePage(QWidget):
             except Exception as exc_dim:  # pragma: no cover - erro de schema ou query
                 tb_dim = traceback.format_exc()
                 errors.append(f"(DuckDB dim_hospitais indisponível: {exc_dim})")
-                print(f"[DEBUG] Heuristica1 (query dim) FALHOU:\n{tb_dim}", file=sys.stderr, flush=True)
+                log.debug(f"Heuristica1 (query dim) FALHOU:\n{tb_dim}")
 
         # ---------------------------------------------------------- H2: CNES CSV local tbEstabelecimento (fallback PRINCIPAL)
         if not used_dim_hospitais:
@@ -1998,7 +2000,7 @@ class PipelinePage(QWidget):
             except Exception as exc_h2:
                 tb = traceback.format_exc()
                 errors.append(f"(CNES CSV indisponível: {exc_h2})")
-                print(f"[DEBUG] Heuristica2 (CNES CSV) FALHOU:\n{tb}", file=sys.stderr, flush=True)
+                log.debug(f"Heuristica2 (CNES CSV) FALHOU:\n{tb}")
                 edf = None
             if edf is not None and not edf.is_empty():
                 try:
@@ -2143,7 +2145,7 @@ class PipelinePage(QWidget):
                 except Exception as exc_h2_iter:  # pragma: no cover
                     tb = traceback.format_exc()
                     errors.append(f"(CNES CSV iteração: {exc_h2_iter})")
-                    print(f"[DEBUG] Heuristica2 (iteração CSV CNES) FALHOU:\n{tb}", file=sys.stderr, flush=True)
+                    log.debug(f"Heuristica2 (iteração CSV CNES) FALHOU:\n{tb}")
 
         # ---------------------------------------------------------- H3: Datasources CNES FTP/Local complementar
         try:
@@ -2180,7 +2182,7 @@ class PipelinePage(QWidget):
                     using_source += f" + Datasources extra ({added_extra:,})"
         except Exception as exc_h3:  # pragma: no cover
             warnings.append(f"(fonte auxiliar CNES não usada: {exc_h3})")
-            print(f"[DEBUG] Heuristica3 (datasources) FALHOU: {exc_h3}", file=sys.stderr, flush=True)
+            log.debug(f"Heuristica3 (datasources) FALHOU: {exc_h3}")
 
         # ---------------------------------------------------------- H4: Dedup por CNES (zfill 7)
         try:
@@ -2193,11 +2195,11 @@ class PipelinePage(QWidget):
                 seen.add(k)
                 uniq.append((str(c or ""), str(n or ""), str(u or ""), str(t or "")))
             self._hospitals_data = uniq
-            print(f"[DEBUG] _reload_hospitals_from_cnes RESULTADO: {len(self._hospitals_data)} registros (fonte={using_source})", file=sys.stderr, flush=True)
+            log.debug(f"_reload_hospitals_from_cnes RESULTADO: {len(self._hospitals_data)} registros (fonte={using_source})")
         except Exception as exc_h4:
             tb = traceback.format_exc()
             errors.append(f"(Dedup por CNES: {exc_h4})")
-            print(f"[DEBUG] Heuristica4 (dedup CNES) FALHOU:\n{tb}", file=sys.stderr, flush=True)
+            log.debug(f"Heuristica4 (dedup CNES) FALHOU:\n{tb}")
 
         # ---------------------------------------------------------- H5: PÓS-FILTRO GEOGRÁFICO EM MEMÓRIA
         #    (apply_geo_filter=True = botão roxo Aplicar filtros geográficos)
@@ -2253,7 +2255,7 @@ class PipelinePage(QWidget):
                                 if macro_res or drs_res:
                                     dict_cnes_to_geo[cc] = (macro_res, drs_res)
                 except Exception as exc_dict:
-                    print(f"[DEBUG] H5 geo_dict falhou: {exc_dict}", file=sys.stderr, flush=True)
+                    log.debug(f"H5 geo_dict falhou: {exc_dict}")
 
                 # Mantém só os hospitais cujo (macro está na sel_macros) E/OU (drs está na sel_drs)
                 macros_upper = {str(m).strip() for m in sel_macros if str(m).strip()}
@@ -2304,11 +2306,11 @@ class PipelinePage(QWidget):
                         f"📍 Recorte geográfico aplicado (Macro/DRS): "
                         f"{total_antes:,} → {len(mantem):,} hospitais mantidos."
                     )
-                print(f"[DEBUG] H5 Pós-filtro geo OK. Antes={total_antes} Depois={len(self._hospitals_data)} | apply_geo_filter={apply_geo_filter}", file=sys.stderr, flush=True)
+                log.debug(f"H5 Pós-filtro geo OK. Antes={total_antes} Depois={len(self._hospitals_data)} | apply_geo_filter={apply_geo_filter}")
             except Exception as exc_h5:
                 tb = traceback.format_exc()
                 errors.append(f"(Pós-filtro geográfico: {exc_h5})")
-                print(f"[DEBUG] H5 Pós-filtro geo FALHOU:\n{tb}", file=sys.stderr, flush=True)
+                log.debug(f"H5 Pós-filtro geo FALHOU:\n{tb}")
 
         # Feedback UI
         if not self._hospitals_data:
@@ -2399,7 +2401,7 @@ class PipelinePage(QWidget):
                 body += "\nℹ " + ("  ".join(warnings))
             if hasattr(self, "lbl_hosp_status") and self.lbl_hosp_status is not None:
                 self.lbl_hosp_status.set_status(body, "OK")
-            print(f"[DEBUG] _reload_hospitals_from_cnes OK | {len(self._hospitals_data)} hospitais carregados | source={using_source}", file=sys.stderr, flush=True)
+            log.debug(f"_reload_hospitals_from_cnes OK | {len(self._hospitals_data)} hospitais carregados | source={using_source}")
         self._filter_hosp_list(self.search_hosp.text() if hasattr(self, "search_hosp") else "")
 
     def _filter_hosp_list(self, text: str = "") -> None:
@@ -2431,7 +2433,7 @@ class PipelinePage(QWidget):
                     others.append(row)
             if matching_uf:
                 raw = matching_uf + others
-                print(f"[DEBUG] _filter_hosp_list reordenado. UF(s) selecionada(s) {sorted(sel_ufs_now)}: {len(matching_uf)} hospitais PRIMEIRO. Outros {len(others)} depois.", file=sys.stderr, flush=True)
+                log.debug(f"_filter_hosp_list reordenado. UF(s) selecionada(s) {sorted(sel_ufs_now)}: {len(matching_uf)} hospitais PRIMEIRO. Outros {len(others)} depois.")
         # -----------------------------------------------------------------
 
         for cnes, nome, uf, tipo in raw:
@@ -3062,7 +3064,8 @@ class PipelinePage(QWidget):
         if not path:
             return
         try:
-            self._last_result.df.write_excel(path)
+            from papahr.processors import export_view
+            export_view(self._last_result.df, self._last_result.system).write_excel(path)
             QMessageBox.information(self, "Sucesso", f"Exportado para:\n{path}")
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Erro", str(e))
@@ -3095,7 +3098,7 @@ class LLMPage(QWidget):
         root.addWidget(title)
         root.addWidget(subtitle)
 
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = DeferredSplitter(Qt.Horizontal, [380, 700])
 
         # --- Esquerda: Dataset info + perguntas pré-definidas ---
         left_card = CardWidget()
@@ -3188,7 +3191,6 @@ class LLMPage(QWidget):
         rl.addWidget(self.llm_prog)
 
         splitter.addWidget(right_card)
-        splitter.setSizes([380, 700])
 
         root.addWidget(splitter, 1)
         self._check_llm()

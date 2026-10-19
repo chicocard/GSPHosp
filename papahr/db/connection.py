@@ -642,6 +642,7 @@ class DuckDBConnection:
             error=error_etl,
             duration_ms=elapsed_ms,
         )
+        self.prune_old_bronze(keep=5)
         return rid
 
     # ------------------------------------------------------------------
@@ -776,6 +777,40 @@ class DuckDBConnection:
             sql += f" LIMIT {int(limit)}"
 
         return self.sql_to_polars(sql, params if params else None)
+
+    def prune_old_bronze(self, keep: int = 5) -> int:
+        """Remove tabelas bronze.bronze_* de cargas antigas, mantendo as `keep` mais recentes.
+
+        O silver/gold já consolidam o dado; a bronze é só a cópia bruta da execução.
+        Sem poda, cada execução deixava uma tabela nova para sempre (17 em 2 meses).
+        Retorna o número de tabelas removidas. Nunca levanta exceção.
+        """
+        removed = 0
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    """SELECT table_name FROM information_schema.tables
+                       WHERE table_schema = 'bronze' AND table_name LIKE 'bronze_%'"""
+                ).fetchall()
+                existentes = {r[0] for r in rows}
+                recentes = self._conn.execute(
+                    """SELECT bronze_table FROM bronze.load_runs
+                       WHERE bronze_table IS NOT NULL AND bronze_table <> ''
+                       ORDER BY ts_utc DESC LIMIT ?""",
+                    [int(max(1, keep))],
+                ).fetchall()
+                manter = {str(r[0]).split(".")[-1] for r in recentes}
+                for t in sorted(existentes - manter):
+                    try:
+                        self._conn.execute(f'DROP TABLE IF EXISTS bronze."{t}"')
+                        removed += 1
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("Nao foi possivel remover bronze %s: %s", t, e)
+            if removed:
+                log.info("Retencao bronze: %d tabela(s) antiga(s) removida(s), mantidas %d", removed, keep)
+        except Exception as e:  # noqa: BLE001
+            log.warning("prune_old_bronze falhou: %s", e)
+        return removed
 
     def list_load_runs(self, limit: int = 50) -> pl.DataFrame:
         """Últimas N cargas ETL do bronze.load_runs (para UI selecionar carga)."""

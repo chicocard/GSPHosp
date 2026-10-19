@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSizePolicy,
-    QSplitter,
     QStackedWidget,
     QStatusBar,
     QToolBar,
@@ -41,6 +40,7 @@ from papahr.logging_config import configure_logging, get_logger
 from papahr.ui.pages import DashboardPage, PipelinePage, SettingsPage
 from papahr.ui.pages.login_page import LoginPage
 from papahr.ui.pages.llm_page import LlmPage
+from papahr.ui.widgets import DeferredSplitter
 from papahr.auth import (
     AppUser,
     UserRole,
@@ -179,7 +179,8 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        spl_main = QSplitter(Qt.Horizontal)
+        # setSizes() é aplicado no 1º showEvent (HC-6), não no __init__
+        spl_main = DeferredSplitter(Qt.Horizontal, [280, max(1200, self.width() - 300)])
         spl_main.setChildrenCollapsible(False)
         spl_main.setHandleWidth(8)
 
@@ -235,7 +236,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("pageContainer")
-        self.stack.setContentsMargins(8, 8, 8, 8)
+        self.stack.setContentsMargins(16, 16, 16, 16)
         self.stack.setMinimumWidth(820)
         self.page_pipeline = PipelinePage()
         self.page_dashboard = DashboardPage()
@@ -257,7 +258,6 @@ class MainWindow(QMainWindow):
         spl_main.addWidget(self.stack)
         spl_main.setStretchFactor(0, 0)
         spl_main.setStretchFactor(1, 1)
-        spl_main.setSizes([280, max(1200, self.width() - 300)])
         spl_main.setCollapsible(0, True)
         spl_main.setCollapsible(1, False)
         spl_main.setObjectName("rootMainSplitter")

@@ -36,7 +36,7 @@ class LlmPage(QWidget):
         
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
+        root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
         
         title = QLabel("🧠 Assistente LLM Local")
@@ -67,7 +67,7 @@ class LlmPage(QWidget):
         
         self.btn_send = QPushButton("Enviar")
         self.btn_send.setStyleSheet(
-            "QPushButton{padding:10px 20px; border-radius:8px; background:#0D9488; color:#FFFFFF; font-weight:700;}"
+            "QPushButton{padding:10px 20px; border-radius:8px; background:#0D9488; color:#FFFFFF; font-weight:800;}"
             "QPushButton:hover{background:#0F766E; color:#FEF08A;}"
         )
         self.btn_send.clicked.connect(self._send_msg)

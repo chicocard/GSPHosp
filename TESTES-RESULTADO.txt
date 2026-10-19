@@ -17,7 +17,10 @@ GSPHosp — Testes FASE 1 (sem GUI)
 [PASS] Teste 13-heur2-drs06: filtrado=9,070 dilson_presente=True
 [PASS] Teste 14-search: exato=1 dilson=27 codigo=1
 [PASS] Teste 15-fallback: added=1 invalid=[]
+[PASS] Teste 0b-ruff: ruff: 0 erros de sintaxe/nome indefinido em papahr/
+[PASS] Teste 16-integracao-real: rows=4541 cols=186 proc=100% cid=100% mun=100% huff=OK decay=125 alertas=3
+[PASS] Teste 17-dashboard-headless: excecoes=0 mapa_hospitais=25 aneis_populados=60 min_largura=1237px tabs=7
 
 ======================================================================
-RESUMO: 16 PASS | 0 FAIL | 0 SKIP (total 16)
+RESUMO: 19 PASS | 0 FAIL | 0 SKIP (total 19)
 ======================================================================

@@ -33,7 +33,21 @@ _FILE_MAP: dict[SIGTAP_DETAIL_NAMES, tuple[str, str]] = {
     "CID": ("tb_cid.txt", "tb_cid_layout.txt"),
 }
 
-_ZIP_RE = re.compile(r"^TabelaUnificada_(?P<versao>\d+)_(?P<year>\d{4})(?P<month>\d{2})\.zip$", re.I)
+# Nomes publicados no FTP (ftp2.datasus.gov.br/pub/sistemas/tup/downloads/):
+#   formato ATUAL : TabelaUnificada_202610_v2610151110.zip   (competência + versão)
+#   formato antigo: TabelaUnificada_<versao>_202301.zip
+_ZIP_RE_ATUAL = re.compile(r"^TabelaUnificada_(?P<year>\d{4})(?P<month>\d{2})(?:_v\d+)?\.zip$", re.I)
+_ZIP_RE_ANTIGO = re.compile(r"^TabelaUnificada_(?P<versao>\d+)_(?P<year>\d{4})(?P<month>\d{2})\.zip$", re.I)
+_ALIAS_FILE = "ALIAS_OF.txt"  # versão sem publicação própria aponta para a versão vizinha
+
+
+def parse_sigtap_zip_name(fname: str) -> str | None:
+    """Extrai a competência AAAAMM de um nome de ZIP do SIGTAP (ou None)."""
+    for rx in (_ZIP_RE_ATUAL, _ZIP_RE_ANTIGO):
+        m = rx.match(fname.strip())
+        if m:
+            return f"{m.group('year')}{m.group('month')}"
+    return None
 
 
 @dataclass(slots=True)
@@ -65,16 +79,51 @@ class SIGTAPRepository:
         )
         out: list[tuple[str, str, date]] = []
         for f in files:
-            m = _ZIP_RE.match(f)
-            if not m:
+            fname = f.rsplit("/", 1)[-1]
+            version_id = parse_sigtap_zip_name(fname)
+            if not version_id:
                 continue
             try:
-                d = ymd(f"{m.group('year')}{m.group('month')}")
-                version_id = f"{m.group('year')}{m.group('month')}"
-                out.append((f, version_id, d))
+                out.append((fname, version_id, ymd(version_id)))
             except Exception:  # noqa: PERF203
                 continue
-        return out
+        # Se houver mais de um ZIP para a mesma competência, fica o último (mais novo)
+        by_version: dict[str, tuple[str, str, date]] = {}
+        for item in sorted(out, key=lambda t: t[0]):
+            by_version[item[1]] = item
+        return sorted(by_version.values(), key=lambda t: t[1])
+
+    # --------------------------------------------------------------------
+    def version_dir(self, version_id: str) -> Path:
+        return self.cache_dir / version_id
+
+    def _resolve_dir(self, version_id: str) -> Path | None:
+        """Diretório com os tb_*.txt da versão (segue ALIAS_OF se existir)."""
+        d = self.version_dir(version_id)
+        if not d.is_dir():
+            return None
+        alias = d / _ALIAS_FILE
+        if alias.is_file():
+            target = self.cache_dir / alias.read_text(encoding="utf-8").strip()
+            return target if any(target.glob("tb_*.txt")) else None
+        return d if any(d.glob("tb_*.txt")) else None
+
+    def has_version(self, version_id: str) -> bool:
+        """True só se a versão tem dados reais (pasta vazia NÃO conta)."""
+        return self._resolve_dir(version_id) is not None
+
+    def available_versions(self) -> list[str]:
+        if not self.cache_dir.exists():
+            return []
+        return sorted(p.name for p in self.cache_dir.iterdir() if p.is_dir() and self.has_version(p.name))
+
+    def _limpar_pasta_vazia(self, version_id: str) -> None:
+        d = self.version_dir(version_id)
+        if d.is_dir() and not any(d.iterdir()):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
 
     def download(
         self,
@@ -85,85 +134,67 @@ class SIGTAPRepository:
         month_end: int | None = None,
         specific_dates: list[str] | None = None,
         newer: bool = False,
-        prefer_github_mirror: bool = True,
+        prefer_github_mirror: bool = False,  # mantido por compatibilidade; espelho desativado
     ) -> list[str]:
-        """Baixa arquivos do SIGTAP e retorna os version_ids baixados.
+        """Garante as versões SIGTAP pedidas no cache e retorna os version_ids disponíveis.
 
-        Strategy:
-          1. Se prefer_github_mirror=True, tenta o mirror GitHub RenatoKR/SIGTAP
-             (faster e resiliente a indisponibilidades do FTP DATASUS).
-          2. Fallback para o FTP oficial do DATASUS.
+        Fonte única: FTP oficial do DATASUS (ftp2). O antigo espelho GitHub foi
+        removido porque responde 404 para todas as competências desde 2025.
+
+        Competência sem ZIP próprio no FTP (ex.: mês ainda não publicado) recebe um
+        ALIAS para a competência publicada mais próxima ANTERIOR, de modo que o join
+        por `file_version_id` continue funcionando com a tabela vigente.
         """
         version_ids_wanted: list[str] = []
+        remote: list[tuple[str, str, date]] | None = None
         if specific_dates:
             version_ids_wanted = list(dict.fromkeys(specific_dates))
         elif newer:
-            # Pega o mais recente do FTP (lista remoto primeiro)
-            ftp_versions = [v for (_n, v, _d) in self._list_remote()]
-            if ftp_versions:
-                version_ids_wanted = [ftp_versions[-1]]
+            remote = self._list_remote()
+            if remote:
+                version_ids_wanted = [remote[-1][1]]
         elif year_start and month_start and year_end and month_end:
             from papahr.core import year_month_iter
             version_ids_wanted = [f"{y:04d}{m:02d}" for y, m in
                                   year_month_iter(year_start, month_start, year_end, month_end)]
 
-        downloaded: list[str] = []
-        # 1. Tenta GitHub mirror
-        if prefer_github_mirror and version_ids_wanted:
-            for v in version_ids_wanted:
-                if self._download_github_mirror(v):
-                    downloaded.append(v)
-
-        # 2. Pega as restantes pelo FTP oficial
-        remaining = [v for v in version_ids_wanted if v not in downloaded]
+        ok: list[str] = [v for v in version_ids_wanted if self.has_version(v)]
+        remaining = [v for v in version_ids_wanted if v not in ok]
         if remaining:
-            files = self._list_remote()
-            files = [f for f in files if f[1] in remaining]
-            for fname, version_id, _d in files:
-                if self._download_ftp(fname, version_id):
-                    downloaded.append(version_id)
-        # Limpeza
+            for v in remaining:
+                self._limpar_pasta_vazia(v)
+            try:
+                remote = remote if remote is not None else self._list_remote()
+            except Exception as e:  # noqa: BLE001
+                log.warn("Falhou listar SIGTAP no FTP", err=str(e))
+                remote = []
+            by_version = {v: fname for (fname, v, _d) in remote}
+            for v in remaining:
+                if v in by_version:
+                    if self._download_ftp(by_version[v], v):
+                        ok.append(v)
+                    continue
+                # Sem publicação própria: alias para a mais recente anterior
+                anteriores = sorted(x for x in by_version if x <= v)
+                if not anteriores:
+                    log.warn("SIGTAP: nenhuma versao publicada para", version=v)
+                    continue
+                alvo = anteriores[-1]
+                if self.has_version(alvo) or self._download_ftp(by_version[alvo], alvo):
+                    d = ensure_dir(self.version_dir(v))
+                    (d / _ALIAS_FILE).write_text(alvo, encoding="utf-8")
+                    log.info("SIGTAP: competencia sem ZIP proprio, usando alias", version=v, alvo=alvo)
+                    ok.append(v)
         if year_start and month_start and year_end and month_end:
             self._cleanup_old(date(year_start, month_start, 1), date(year_end, month_end, 1))
-        return downloaded
+        return ok
 
     # --------------------------------------------------------------------
-    GITHUB_RAW = (
-        "https://raw.githubusercontent.com/RenatoKR/SIGTAP/main/"
-        "TabelaUnificada_{version_id}.zip"
-    )
-
-    def _download_github_mirror(self, version_id: str) -> bool:
-        """Faz download do ZIP SIGTAP via mirror público GitHub RenatoKR."""
-        import httpx
-        dest_dir = ensure_dir(self.cache_dir / version_id)
-        if any(dest_dir.glob("tb_*.txt")):
-            return True  # já foi
-        url = self.GITHUB_RAW.format(version_id=version_id)
-        zip_path = dest_dir / f"TabelaUnificada_{version_id}.zip"
-        try:
-            with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-                resp = client.get(url)
-                if resp.status_code != 200:
-                    log.debug("[SIGTAP] GitHub mirror não tem", version=version_id,
-                              status=resp.status_code)
-                    return False
-                zip_path.write_bytes(resp.content)
-            self._unzip(zip_path, dest_dir)
-            try:
-                zip_path.unlink()
-            except Exception:
-                pass
-            log.info("[SIGTAP] Mirror GitHub OK", version=version_id)
-            return True
-        except Exception as e:  # noqa: BLE001
-            log.debug("[SIGTAP] Mirror GitHub falhou", version=version_id, err=str(e))
-            return False
-
     def _download_ftp(self, fname: str, version_id: str) -> bool:
         dest_dir = ensure_dir(self.cache_dir / version_id)
         if any(dest_dir.glob("tb_*.txt")):
             return True
+        log.info("SIGTAP: baixando do FTP", arquivo=fname, version=version_id)
         url = f"ftp://{self.settings.datasus_ftp_host2}/pub/sistemas/tup/downloads/{fname}"
         zip_path = dest_dir / fname
         try:
@@ -201,18 +232,17 @@ class SIGTAPRepository:
     def _parse_fixed_width(self, version_id: str, detail: SIGTAP_DETAIL_NAMES) -> pl.DataFrame:
         """Lê um arquivo TXT de layout fixo do SIGTAP usando seu layout."""
         raw_name, layout_name = _FILE_MAP[detail]
-        # Encontra os arquivos em qualquer subdiretório (versão)
-        raw_files = sorted(self.cache_dir.glob(f"**/{raw_name}"))
-        layout_files = sorted(self.cache_dir.glob(f"**/{layout_name}"))
+        src_dir = self._resolve_dir(version_id)
+        if src_dir is None:
+            log.warn("Arquivos SIGTAP ausentes para", detail=detail, version=version_id)
+            return pl.DataFrame()
+        raw_files = sorted(src_dir.glob(raw_name)) or sorted(src_dir.glob(raw_name.upper()))
+        layout_files = sorted(src_dir.glob(layout_name)) or sorted(src_dir.glob(layout_name.upper()))
         if not raw_files or not layout_files:
             log.warn("Arquivos SIGTAP ausentes para", detail=detail, version=version_id)
             return pl.DataFrame()
-        # Monta layout a partir do primeiro layout file encontrado
         layouts: list[dict[str, int | str]] = []
-        # usa o layout correspondente ao version_id se houver
-        layout_candidates = [
-            lf for lf in layout_files if lf.parent.name == version_id
-        ] or layout_files
+        layout_candidates = layout_files
         with open(layout_candidates[0], encoding="latin-1", errors="replace") as f:
             lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("Coluna")]
         for ln in lines:
@@ -233,15 +263,14 @@ class SIGTAPRepository:
                 continue
         if not layouts:
             return pl.DataFrame()
-        # Lê os arquivos raw correspondentes ao version_id
-        raw_candidates = [rf for rf in raw_files if rf.parent.name == version_id] or raw_files
+        # file_version_id é SEMPRE a competência pedida (mesmo quando é alias)
         all_rows: list[dict[str, str]] = []
-        for rf in raw_candidates:
+        for rf in raw_files:
             with open(rf, encoding="latin-1", errors="replace") as f:
                 for line in f:
                     if not line.strip():
                         continue
-                    row = {"file_version_id": rf.parent.name}
+                    row = {"file_version_id": version_id}
                     for lyt in layouts:
                         s = int(lyt["start"]) - 1
                         e = int(lyt["end"])
@@ -251,7 +280,7 @@ class SIGTAPRepository:
 
     def get_detail(self, detail: SIGTAP_DETAIL_NAMES) -> pl.DataFrame:
         """Retorna o detalhe consolidado de todas as versões baixadas."""
-        versions = sorted([p.name for p in self.cache_dir.iterdir() if p.is_dir()])
+        versions = self.available_versions()
         frames = []
         for v in versions:
             try:

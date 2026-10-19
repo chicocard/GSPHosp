@@ -233,7 +233,14 @@ class CNESRepository:
                     dbcs = [p for p in dbcs if len(p.name) >= 8 and p.name[2:4].upper() in uf_set]
             if dbcs:
                 log.info("[CNES] Camada 2/3 lendo %d arquivos DBC", len(dbcs))
-                df_raw = read_many_dbc([str(p) for p in dbcs])
+                try:
+                    df_raw = read_many_dbc([str(p) for p in dbcs])
+                except Exception as exc_dbc:  # noqa: BLE001
+                    # read_many_dbc agora FALHA explicitamente em vez de retornar vazio;
+                    # preserva o contrato desta camada ("NUNCA QUEBRA PIPELINE") caindo
+                    # para a proxima camada com df vazio (sem dado sintetico).
+                    log.warning("[CNES] Camada 2/3 falha ao ler DBC: %s", exc_dbc)
+                    df_raw = pl.DataFrame()
                 if not df_raw.is_empty():
                     cols_want = [c for c in ("CNES", "FANTASIA", "COMPETEN") if c in df_raw.columns]
                     df_st = df_raw.select(cols_want) if cols_want else df_raw

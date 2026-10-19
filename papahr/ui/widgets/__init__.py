@@ -13,10 +13,33 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+
+class DeferredSplitter(QSplitter):
+    """QSplitter que só aplica ``setSizes()`` no primeiro ``showEvent`` (HC-6).
+
+    Chamar ``setSizes()`` no ``__init__`` é ineficaz: o splitter ainda não tem
+    geometria (largura/altura reais) e o Qt descarta ou distorce os valores.
+    Guardar os tamanhos desejados e aplicá-los quando o widget é efetivamente
+    exibido garante as proporções corretas em 1366x768 e a cada abertura de aba.
+    """
+
+    def __init__(self, orientation, sizes: list[int] | None = None,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(orientation, parent)
+        self._deferred_sizes = list(sizes) if sizes else None
+        self._sizes_applied = False
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._sizes_applied and self._deferred_sizes:
+            self.setSizes(self._deferred_sizes)
+            self._sizes_applied = True
 
 
 class CardWidget(QFrame):
@@ -58,12 +81,18 @@ class KpiCard(QFrame):
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("kpiCard")
+        self.setProperty("class", "kpiCard")
         self._accent = accent
         self._fmt = format  # Python f-string-style format, e.g. "{:.1f} %"
         self._icon = icon
+        # Estilo explícito: não depende do QSS global estar carregado
+        self.setStyleSheet(
+            "QFrame#kpiCard{background:#121C1E;border:1px solid #233539;border-radius:12px;"
+            f"border-left:4px solid {accent};}}"
+        )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(4)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(2)
 
         label_text = (f"{icon}  " if icon else "") + label.upper()
         self.lbl_label = QLabel(label_text)
@@ -74,7 +103,7 @@ class KpiCard(QFrame):
         self.lbl_value = QLabel(self._format(value))
         self.lbl_value.setObjectName("kpiValue")
         self.lbl_value.setWordWrap(True)
-        self.lbl_value.setStyleSheet("color: #FFFFFF; font-size: 22px; font-weight: 800;")
+        self.lbl_value.setStyleSheet("color: #FFFFFF; font-size: 20px; font-weight: 800;")
 
         self.lbl_delta = QLabel(delta)
         self.lbl_delta.setStyleSheet(f"color: {accent}; font-size:9pt;")
@@ -84,7 +113,7 @@ class KpiCard(QFrame):
         if delta:
             layout.addWidget(self.lbl_delta)
 
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(84)
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20)
         shadow.setOffset(0, 2)
@@ -100,8 +129,14 @@ class KpiCard(QFrame):
                     return self._fmt.format(v)
                 except Exception:
                     pass
+            av = abs(float(v))
+            # Compacto: cabe no card sem quebrar linha ("63,9 mi" em vez de "63 907 906,62")
+            if av >= 1e9:
+                return f"{v / 1e9:,.2f} bi".replace(",", "_").replace(".", ",").replace("_", ".")
+            if av >= 1e6:
+                return f"{v / 1e6:,.1f} mi".replace(",", "_").replace(".", ",").replace("_", ".")
             if isinstance(v, float):
-                return f"{v:,.2f}".replace(",", " ").replace(".", ",")
+                return f"{v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
             return f"{v:,}".replace(",", ".")
         return str(v)
 
@@ -220,6 +255,7 @@ __all__ = [
     "AnimatedProgress",
     "CardWidget",
     "ConcentricRingsMap",
+    "DeferredSplitter",
     "HospitalMapPoint",
     "KpiCard",
     "RingBucket",

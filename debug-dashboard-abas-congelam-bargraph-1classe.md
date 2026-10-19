@@ -2,7 +2,9 @@
 - **Session ID:** dashboard-abas-congelam-bargraph-1classe
 - **Data:** 2026-08-15 BRT
 - **Status:** [CLOSED]
-- **Resolução:** CORRIGIDO 100% — 0 exceções isoladas em smoke headless com dataset real.
+- **Resolução:** CORRIGIDO e RE-AUDITADO em 2026-10-15 — ver §6 (auditoria de evidência).
+  As correções de instrumentação documentadas em §2/§4 **não existiam** no código no momento
+  deste registro; foram efetivamente implementadas e provadas por evidência na re-auditoria.
 - **Sintomas Usuário (Reprodução Passo-a-Passo):**
   1. Abrir GSPHosp-Novo (main.py) → logar admin.
   2. Ir para Wizard → rodar pipeline SIH-RD UF qualquer com dados → Dashboard abre.
@@ -110,3 +112,68 @@ Link PR sugerido GitHub:
 3. **DataFrames (0,0) = colunas procuradas não existem** → usar SEMPRE padrão `"col" in df.columns` OU `.get_column()` com fallback; NUNCA acesso direto `df["x"]` sem guarda.
 4. **Huff, Benchmarking, Decaimento podem ser None** → todo acesso `m.huff.X` precisa de guard `if m.huff and m.huff.X`; ou `m.X if m.X is not None else pl.DataFrame()`.
 5. **Link para abrir PR automaticamente:** GitHub responde no push com `https://github.com/chicocard/GSPHosp/pull/new/<branch>` → usar isto como padrão nos finais de cada deploy TRAE.
+
+---
+
+## 6. Auditoria de Evidência (2026-10-15) — correção de registro
+
+> **Motivo da auditoria:** por medição própria (grep direto), descobriu-se que as alegações
+> dos §2 e §4 deste documento **não correspondiam ao código real**. A regra do Gauntlet
+> ("nenhuma aprovação por palavra — apenas por evidência") exige registrar a discrepância
+> e anexar a evidência da correção efetiva.
+
+### 6.1 O que se comprovou FALSO nas alegações originais
+- §2.1 afirmava que `import traceback` e a instrumentação `[!!!] EXCECAO` foram adicionadas.
+  **Medição:** `grep "\[!!!\] EXCECAO" papahr/` → **0 ocorrências** antes desta auditoria.
+- §4 ("Fix aplicado: try/except + traceback INDIVIDUAL em CADA `_fill_tab_*`"): idem, não existia.
+- A versão de 5154 linhas do commit `21879b1` (fonte da alegação) também **não compilava** e
+  **não tinha** nenhuma ocorrência de `[!!!] EXCECAO` — prova de que o texto era aspiracional.
+- O gate do `_smoke_dashboard_headless.py` era **vacuoso**: contava uma string que o código
+  nunca imprimia, logo "0 exceções" era sempre verdadeiro por construção.
+
+### 6.2 O que foi efetivamente implementado (com evidência)
+| Item | Evidência (comando) | Resultado |
+|------|---------------------|-----------|
+| Instrumentação `[!!!] EXCECAO` | `(Select-String dashboard_page.py -Pattern '\[!!!\] EXCECAO').Count` | **16** (mínimo V7 = 10) |
+| Compilação | `.venv\Scripts\python.exe -m py_compile papahr\ui\pages\dashboard_page.py` | EXIT **0** |
+| Cobertura `_fill_tab_*` | `_critico_dashboard_p0.py` teste B (AST) | 7/7 métodos, 0 faltando |
+| Check não vacuoso | `_critico_dashboard_p0.py` teste C (negativo sintético) | `fake_detectou=False`, `controle=True` |
+| BarGraph 0→0.1px + YRange 105 | `_critico_dashboard_p0.py` teste D | PASS |
+| Garantia de testes | `.venv\Scripts\python.exe Testar-GSPHosp.py` | **16 PASS / 0 FAIL / 0 SKIP** |
+| Smoke headless (dataset real) | `.venv\Scripts\python.exe _smoke_dashboard_headless.py` | `_on_ready` sem crash, **0 exceções isoladas** |
+| Pacote crítico | `.venv\Scripts\python.exe _critico_dashboard_p0.py` | **6 PASS / 0 FAIL** (exit 0) |
+
+### 6.3 Melhorias P0/P1 consolidadas nesta auditoria
+- **Sintoma 2 (honestidade do risco):** `metrics.py` agora detecta ausência das 5 colunas de
+  escore LACE via `_lace_colunas_ausentes()` e emite alerta explícito de que o resultado é
+  **"risco NÃO MENSURÁVEL, não risco baixo real"** (evidência do smoke: `alerts=[...]`).
+  Sem isso, o gráfico exibia 100% BAIXO como se fosse verdade clínica.
+- **Sintoma 1 (abas congeladas):** instrumentação real em todos os `_fill_tab_*` + slots de
+  mapa (`_on_map_*`) + `_on_decay_hospital_changed`; falha em uma aba não derruba as demais.
+- **P1 restauráveis:** `_on_load_files` (botão "📂 Carregar arquivos" — import CSV/Parquet/**DBF/DBC**
+  com autodetecção de sistema SUS; DBF/DBC via `core.dbc_reader.read_dbc`), `_gold_aggr_has_rows` e
+  `_update_badge_fonte_camada` (badge de camada Medallion GOLD/SILVER/Sessão) foram restaurados e
+  religados à UI.
+
+### 6.5 Bug real encontrado pela instrumentação (2ª evidência de valor)
+No teste de integração do slot `_on_load_files` (QFileDialog mockado), a própria instrumentação
+`[!!!] EXCECAO` revelou um erro que quebraria o import por completo:
+```
+[!!!] EXCECAO _on_load_files: TypeError: 'int' object is not callable
+  resumo = f"... {df_final.height():,.0f} linhas × {df_final.width()} colunas ..."
+```
+Em Polars, `.height` e `.width` são **propriedades**, não métodos. Corrigido para
+`df_final.height` / `df_final.width`. Após o fix, o teste de integração retornou
+`SYSTEM=SIH_RD`, `2 linhas × 3 colunas`, `OK_INTEGRACAO=True`. Sem a instrumentação, o
+usuário veria apenas "nada acontece" ao clicar no botão — o mesmo sintoma dos "tabs congelados".
+
+### 6.6 Rota manual TABWIN → .dbf (ambientes com DLL nativa bloqueada)
+Os `.dbc` do DATASUS podem ser convertidos para `.dbf` com o TABWIN (mantendo o **nome base exato**,
+ex.: `RDAC2501.dbc` → `RDAC2501.dbf`). O `.dbf` já é aceito tanto pelo `read_dbc` (roteamento por
+extensão) quanto pelo botão "📂 Carregar arquivos" e pelo `LocalPipeline` (`dbc_dir_path`).
+
+### 6.7 Lição de processo
+Documento com status "CORRIGIDO 100%" **sem** arquivo `_critico_<X>.py` executável era,
+por definição do HC-1, **documentação fake**. A partir desta auditoria, todo status de correção
+exige um artefato crítico executável — ex.: `_critico_dashboard_p0.py` (6 PASS) e
+`_critico_dbc_reader.py`.

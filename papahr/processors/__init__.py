@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
 import polars as pl
@@ -62,6 +63,12 @@ class BaseProcessor(ABC):
 
     system_name: str = ""
     numeric_cols: tuple[str, ...] = ()
+    #: Mapa coluna_interna -> rótulo de EXPORTAÇÃO (layout do pacote R original).
+    #: O DataFrame devolvido por `process()` contém estas colunas renomeadas E
+    #: TODAS as colunas analíticas brutas/enriquecidas (CNES, DIAG_PRINC, QT_DIARIAS,
+    #: MUNIC_RES, ...). Só o CSV/XLSX de exportação é restrito aos rótulos (ver
+    #: `export_view`). Dashboard, DuckDB e Parquet consomem o DataFrame completo.
+    EXPORT_RENAME: dict[str, str] = {}
 
     @abstractmethod
     def process(
@@ -79,6 +86,35 @@ class BaseProcessor(ABC):
         df = trim_all_strings(df)
         return to_numeric(df, list(numeric_cols))
 
+    def _finalize_output(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Renomeia as colunas de exportação e PRESERVA as colunas analíticas.
+
+        Ordem final: [rótulos de exportação..., colunas analíticas...]. Colunas
+        temporárias (prefixo "_") são descartadas. A chave `CNES` é normalizada
+        para 7 dígitos (Utf8, zero à esquerda) — contrato do dashboard/DuckDB.
+        """
+        rename_map = self.EXPORT_RENAME
+        existing = {k: v for k, v in rename_map.items() if k in df.columns and k != v}
+        # Cópia com o rótulo de exportação; o nome ORIGINAL permanece disponível
+        # (ex.: "Ano processamento" E "ANO_CMPT"), pois dashboard/DuckDB usam o original.
+        if existing:
+            df = df.with_columns([pl.col(k).alias(v) for k, v in existing.items()])
+        export_cols = [c for c in rename_map.values() if c in df.columns]
+        export_set = set(export_cols)
+        analytic_cols = [c for c in df.columns if c not in export_set and not c.startswith("_")]
+        df = df.select(export_cols + analytic_cols)
+        if "CNES" in df.columns:
+            df = df.with_columns(
+                pl.col("CNES").cast(pl.Utf8, strict=False).str.strip_chars().str.zfill(7).alias("CNES")
+            )
+        return self._trim_and_convert(df, self.numeric_cols)
+
+    @classmethod
+    def export_view(cls, df: pl.DataFrame) -> pl.DataFrame:
+        """Projeção SOMENTE com as colunas de exportação (CSV/XLSX, layout R)."""
+        cols = [c for c in cls.EXPORT_RENAME.values() if c in df.columns]
+        return df.select(cols) if cols else df
+
 
 # ---------------------------------------------------------------------------
 # SIA-PA: Produção Ambulatorial
@@ -87,6 +123,42 @@ class BaseProcessor(ABC):
 class SIAPAProcessor(BaseProcessor):
     system_name = "SIA-PA"
     numeric_cols = ("Frequencia", "Quantidade Apresentada", "Valor Aprovado", "Valor Apresentado")
+    EXPORT_RENAME = {
+        "DT_CMP": "Mes/Ano de Atendimento",
+        "ANO_CMP": "Ano de Atendimento",
+        "MES_CMP": "Mes de Atendimento (Numero)",
+        "NM_MES_CMP": "Mes de Atendimento",
+        "PA_CMP": "Ano/Mes de Atendimento",
+        "PA_MVM": "Ano/Mes de Processamento",
+        "DT_MVM": "Mes/Ano de Processamento",
+        "ANO_MVM": "Ano de Processamento",
+        "MES_MVM": "Mes de Processamento (Numero)",
+        "NM_MES_MVM": "Mes de Processamento",
+        "NO_CID": "Nome da Morbidade (CID)",
+        "PA_PROC_ID": "CO Procedimentos realizados",
+        "NO_PROCEDIMENTO": "Procedimentos realizados",
+        "NO_GRUPO": "Grupo de Procedimentos",
+        "NO_SUB_GRUPO": "SubGrupo de Procedimentos",
+        "NO_FORMA_ORGANIZACAO": "Forma de organizacao",
+        "NO_FINANCIAMENTO": "Tipo de Financiamento",
+        "NO_SUB_FINANCIAMENTO": "TipoFin/Subtipo Financiamento",
+        "NO_OCUPACAO": "Profissional-CBO",
+        "TIPO_REGISTRO": "Instrumento de registro",
+        "COMPLEXIDADE": "Complexidade Procedimento",
+        "PA_QTDAPR": "Frequencia",
+        "PA_QTDPRO": "Quantidade Apresentada",
+        "PA_VALAPR": "Valor Aprovado",
+        "PA_VALPRO": "Valor Apresentado",
+        "nome_municipio": "Municipio Residencia",
+        "nome_regiao": "Regiao Residencia",
+        "nome_microrregiao": "Micro IBGE Residencia",
+        "nome_mesorregiao": "Meso IBGE Residencia",
+        "nome_estado": "Estado Residencia",
+        "NO_ESTABELECIMENTO": "Estabelecimento CNES",
+        "PA_UFMUN": "Cod do Municipio do Estabelecimento",
+        "municipio_estabelecimento": "Municipio do Estabelecimento",
+        "nome_regiao_estabelecimento": "Regiao do Estabelecimento",
+    }
 
     def process(
         self,
@@ -197,48 +269,7 @@ class SIAPAProcessor(BaseProcessor):
                 ]
             )
 
-        # Renomeia para o output final
-        rename_map = {
-            "DT_CMP": "Mes/Ano de Atendimento",
-            "ANO_CMP": "Ano de Atendimento",
-            "MES_CMP": "Mes de Atendimento (Numero)",
-            "NM_MES_CMP": "Mes de Atendimento",
-            "PA_CMP": "Ano/Mes de Atendimento",
-            "PA_MVM": "Ano/Mes de Processamento",
-            "DT_MVM": "Mes/Ano de Processamento",
-            "ANO_MVM": "Ano de Processamento",
-            "MES_MVM": "Mes de Processamento (Numero)",
-            "NM_MES_MVM": "Mes de Processamento",
-            "NO_CID": "Nome da Morbidade (CID)",
-            "PA_PROC_ID": "CO Procedimentos realizados",
-            "NO_PROCEDIMENTO": "Procedimentos realizados",
-            "NO_GRUPO": "Grupo de Procedimentos",
-            "NO_SUB_GRUPO": "SubGrupo de Procedimentos",
-            "NO_FORMA_ORGANIZACAO": "Forma de organizacao",
-            "NO_FINANCIAMENTO": "Tipo de Financiamento",
-            "NO_SUB_FINANCIAMENTO": "TipoFin/Subtipo Financiamento",
-            "NO_OCUPACAO": "Profissional-CBO",
-            "TIPO_REGISTRO": "Instrumento de registro",
-            "COMPLEXIDADE": "Complexidade Procedimento",
-            "PA_QTDAPR": "Frequencia",
-            "PA_QTDPRO": "Quantidade Apresentada",
-            "PA_VALAPR": "Valor Aprovado",
-            "PA_VALPRO": "Valor Apresentado",
-            "nome_municipio": "Municipio Residencia",
-            "nome_regiao": "Regiao Residencia",
-            "nome_microrregiao": "Micro IBGE Residencia",
-            "nome_mesorregiao": "Meso IBGE Residencia",
-            "nome_estado": "Estado Residencia",
-            "NO_ESTABELECIMENTO": "Estabelecimento CNES",
-            "PA_UFMUN": "Cod do Municipio do Estabelecimento",
-            "municipio_estabelecimento": "Municipio do Estabelecimento",
-            "nome_regiao_estabelecimento": "Regiao do Estabelecimento",
-        }
-        existing_renames = {k: v for k, v in rename_map.items() if k in df.columns}
-        df = df.rename(existing_renames)
-        keep = [c for c in rename_map.values() if c in df.columns]
-        df = df.select(keep)
-        return self._trim_and_convert(df, self.numeric_cols)
+        return self._finalize_output(df)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +279,35 @@ class SIAPAProcessor(BaseProcessor):
 class SIHRDProcessor(BaseProcessor):
     system_name = "SIH-RD"
     numeric_cols = ("Frequencia", "Valor Total")
+    EXPORT_RENAME = {
+        "TIPO": "Situacao da AIH",
+        "ANO_CMPT": "Ano processamento",
+        "MES_CMPT": "Mes processamento (Numero)",
+        "NM_MES_CMPT": "Mes processamento",
+        "DT_CMPT": "Mes/Ano processamento",
+        "ANOMES_CMPT": "Ano/Mes processamento",
+        "PROC_REA": "CO Procedimentos realizados",
+        "NO_PROCEDIMENTO": "Procedimentos realizados",
+        "NO_GRUPO": "Grupo de Procedimentos",
+        "NO_SUB_GRUPO": "SubGrupo de Procedimentos",
+        "NO_FORMA_ORGANIZACAO": "Forma de organizacao",
+        "COMPLEXIDADE": "Complexidade do Procedimento",
+        "NO_FINANCIAMENTO": "Financiamento",
+        "NO_SUB_FINANCIAMENTO": "SubTp FAEC",
+        "NO_CID": "Nome da Mobirdade (CID)",
+        "VAL_TOT": "Valor Total",
+        "QTD_AIH": "Frequencia",
+        "N_AIH": "Sequencial",
+        "nome_municipio": "Municipio de Residencia",
+        "nome_regiao": "Regiao Residencia",
+        "nome_estado": "Estado de Residencia",
+        "nome_mesorregiao": "Mesorregiao IBGE de Resid.",
+        "nome_microrregiao": "Microrregiao IBGE de Resid.",
+        "NO_ESTABELECIMENTO": "Hospital (CNES)",
+        "MUNIC_MOV": "Cod do Municipio do Estabelecimento",
+        "municipio_estabelecimento": "Municipio do Estabelecimento",
+        "nome_regiao_estabelecimento": "Regiao do Estabelecimento",
+    }
 
     def process(
         self,
@@ -315,40 +375,7 @@ class SIHRDProcessor(BaseProcessor):
                 ]
             )
 
-        rename_map = {
-            "TIPO": "Situacao da AIH",
-            "ANO_CMPT": "Ano processamento",
-            "MES_CMPT": "Mes processamento (Numero)",
-            "NM_MES_CMPT": "Mes processamento",
-            "DT_CMPT": "Mes/Ano processamento",
-            "ANOMES_CMPT": "Ano/Mes processamento",
-            "PROC_REA": "CO Procedimentos realizados",
-            "NO_PROCEDIMENTO": "Procedimentos realizados",
-            "NO_GRUPO": "Grupo de Procedimentos",
-            "NO_SUB_GRUPO": "SubGrupo de Procedimentos",
-            "NO_FORMA_ORGANIZACAO": "Forma de organizacao",
-            "COMPLEXIDADE": "Complexidade do Procedimento",
-            "NO_FINANCIAMENTO": "Financiamento",
-            "NO_SUB_FINANCIAMENTO": "SubTp FAEC",
-            "NO_CID": "Nome da Mobirdade (CID)",
-            "VAL_TOT": "Valor Total",
-            "QTD_AIH": "Frequencia",
-            "N_AIH": "Sequencial",
-            "nome_municipio": "Municipio de Residencia",
-            "nome_regiao": "Regiao Residencia",
-            "nome_estado": "Estado de Residencia",
-            "nome_mesorregiao": "Mesorregiao IBGE de Resid.",
-            "nome_microrregiao": "Microrregiao IBGE de Resid.",
-            "NO_ESTABELECIMENTO": "Hospital (CNES)",
-            "MUNIC_MOV": "Cod do Municipio do Estabelecimento",
-            "municipio_estabelecimento": "Municipio do Estabelecimento",
-            "nome_regiao_estabelecimento": "Regiao do Estabelecimento",
-        }
-        existing_renames = {k: v for k, v in rename_map.items() if k in df.columns}
-        df = df.rename(existing_renames)
-        keep = [c for c in rename_map.values() if c in df.columns]
-        df = df.select(keep)
-        return self._trim_and_convert(df, self.numeric_cols)
+        return self._finalize_output(df)
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +404,51 @@ class SIHRJProcessor(SIHRDProcessor):
 class SIHSPProcessor(BaseProcessor):
     system_name = "SIH-SP"
     numeric_cols = ("Quantidade Aprovada", "Valor Aprovado", "Quantidade de Ato", "Frequencia")
+    EXPORT_RENAME = {
+        "DT_INTER": "Data Internacao",
+        "MESANO_INT": "Mes/Ano Internacao",
+        "ANOMES_INT": "Ano/Mes Internacao",
+        "ANO_INT": "Ano Internacao",
+        "MES_INT": "Mes Internacao",
+        "MESANO_MVM": "Mes/Ano Processamento",
+        "ANOMES_MVM": "Ano/Mes Processamento",
+        "SP_AA": "Ano Processamento",
+        "SP_MM": "Mes Processamento (Numero)",
+        "NM_MES_MVM": "Mes Processamento",
+        "SP_QT_PROC": "Quantidade Aprovada",
+        "SP_VALATO": "Valor Aprovado",
+        "SP_QTD_ATO": "Quantidade de Ato",
+        "SP_U_AIH": "Frequencia",
+        "SP_NAIH": "No da AIH",
+        "SP_PROCREA": "CO Procedimentos realizados",
+        "proc_principal_NO_PROCEDIMENTO": "Procedimentos realizados",
+        "proc_principal_NO_GRUPO": "Grupo de Procedimentos",
+        "proc_principal_NO_SUB_GRUPO": "SubGrupo de Procedimentos",
+        "proc_principal_NO_FORMA_ORGANIZACAO": "Forma de organizacao",
+        "proc_principal_COMPLEXIDADE": "Complexidade do Procedimento",
+        "proc_principal_NO_FINANCIAMENTO": "Financiamento",
+        "proc_principal_NO_SUB_FINANCIAMENTO": "SubTp FAEC",
+        "SP_ATOPROF": "CO Procedimentos Secundarios",
+        "proc_sec_NO_PROCEDIMENTO": "Procedimentos Secundarios",
+        "proc_sec_NO_GRUPO": "Grupo Proc. Secundario",
+        "proc_sec_NO_SUB_GRUPO": "Sub-grupo Proc. Secundario",
+        "proc_sec_NO_FORMA_ORGANIZACAO": "Forma de organizacao Secundaria",
+        "proc_sec_COMPLEXIDADE": "Complexidade do ato profissional",
+        "proc_sec_NO_FINANCIAMENTO": "Tipo de financiamento do ato profissional",
+        "proc_sec_NO_SUB_FINANCIAMENTO": "Subtipo FAEC do ato profissional",
+        "IN_TP_VAL": "Tipo de Valor",
+        "NO_OCUPACAO": "Ocupacao",
+        "NO_CID": "Nome da Mobirdade (CID)",
+        "nome_municipio": "Municipio Residencia",
+        "nome_regiao": "Regiao Residencia",
+        "nome_microrregiao": "Microrregião IBGE de Residência",
+        "nome_mesorregiao": "Mesorregião IBGE de Residência",
+        "nome_estado": "Estado Residencia",
+        "NO_ESTABELECIMENTO": "Estabelecimento CNES",
+        "SP_M_HOSP": "Cod do Municipio do Estabelecimento",
+        "municipio_estabelecimento": "Municipio do Estabelecimento",
+        "nome_regiao_estabelecimento": "Regiao do Estabelecimento",
+    }
 
     def process(
         self,
@@ -505,56 +577,7 @@ class SIHSPProcessor(BaseProcessor):
                 how="left",
             )
 
-        rename_map = {
-            "DT_INTER": "Data Internacao",
-            "MESANO_INT": "Mes/Ano Internacao",
-            "ANOMES_INT": "Ano/Mes Internacao",
-            "ANO_INT": "Ano Internacao",
-            "MES_INT": "Mes Internacao",
-            "MESANO_MVM": "Mes/Ano Processamento",
-            "ANOMES_MVM": "Ano/Mes Processamento",
-            "SP_AA": "Ano Processamento",
-            "SP_MM": "Mes Processamento (Numero)",
-            "NM_MES_MVM": "Mes Processamento",
-            "SP_QT_PROC": "Quantidade Aprovada",
-            "SP_VALATO": "Valor Aprovado",
-            "SP_QTD_ATO": "Quantidade de Ato",
-            "SP_U_AIH": "Frequencia",
-            "SP_NAIH": "No da AIH",
-            "SP_PROCREA": "CO Procedimentos realizados",
-            "proc_principal_NO_PROCEDIMENTO": "Procedimentos realizados",
-            "proc_principal_NO_GRUPO": "Grupo de Procedimentos",
-            "proc_principal_NO_SUB_GRUPO": "SubGrupo de Procedimentos",
-            "proc_principal_NO_FORMA_ORGANIZACAO": "Forma de organizacao",
-            "proc_principal_COMPLEXIDADE": "Complexidade do Procedimento",
-            "proc_principal_NO_FINANCIAMENTO": "Financiamento",
-            "proc_principal_NO_SUB_FINANCIAMENTO": "SubTp FAEC",
-            "SP_ATOPROF": "CO Procedimentos Secundarios",
-            "proc_sec_NO_PROCEDIMENTO": "Procedimentos Secundarios",
-            "proc_sec_NO_GRUPO": "Grupo Proc. Secundario",
-            "proc_sec_NO_SUB_GRUPO": "Sub-grupo Proc. Secundario",
-            "proc_sec_NO_FORMA_ORGANIZACAO": "Forma de organizacao Secundaria",
-            "proc_sec_COMPLEXIDADE": "Complexidade do ato profissional",
-            "proc_sec_NO_FINANCIAMENTO": "Tipo de financiamento do ato profissional",
-            "proc_sec_NO_SUB_FINANCIAMENTO": "Subtipo FAEC do ato profissional",
-            "IN_TP_VAL": "Tipo de Valor",
-            "NO_OCUPACAO": "Ocupacao",
-            "NO_CID": "Nome da Mobirdade (CID)",
-            "nome_municipio": "Municipio Residencia",
-            "nome_regiao": "Regiao Residencia",
-            "nome_microrregiao": "Microrregião IBGE de Residência",
-            "nome_mesorregiao": "Mesorregião IBGE de Residência",
-            "nome_estado": "Estado Residencia",
-            "NO_ESTABELECIMENTO": "Estabelecimento CNES",
-            "SP_M_HOSP": "Cod do Municipio do Estabelecimento",
-            "municipio_estabelecimento": "Municipio do Estabelecimento",
-            "nome_regiao_estabelecimento": "Regiao do Estabelecimento",
-        }
-        existing_renames = {k: v for k, v in rename_map.items() if k in df.columns}
-        df = df.rename(existing_renames)
-        keep = [c for c in rename_map.values() if c in df.columns]
-        df = df.select(keep)
-        return self._trim_and_convert(df, self.numeric_cols)
+        return self._finalize_output(df)
 
 
 # ---------------------------------------------------------------------------
@@ -574,3 +597,13 @@ def get_processor(system: str) -> BaseProcessor:
         return PROCESSOR_MAP[system]()
     except KeyError as e:
         raise ValueError(f"Sistema invalido: {system}") from e
+
+
+def export_view(df: pl.DataFrame, system: str) -> pl.DataFrame:
+    """Projeção de exportação (CSV/XLSX) para o sistema informado.
+
+    Aceita "SIH-RD" ou "SIH_RD". Se o sistema for desconhecido devolve o df intacto.
+    """
+    key = (system or "").replace("_", "-").upper()
+    cls = PROCESSOR_MAP.get(key)
+    return cls.export_view(df) if cls else df

@@ -22,10 +22,24 @@ from papahr.datasources.counties import CountiesRepository
 from papahr.datasources.sigtap import SIGTAPRepository
 from papahr.geo.reference import resolve_geo_enrichment
 from papahr.logging_config import get_logger
-from papahr.processors import ProcessorContext, get_processor
+from papahr.processors import ProcessorContext, export_view, get_processor
 from papahr.security import PipelineRequest
 
 log = get_logger(__name__)
+
+
+def _municipio_6dig(valor: str) -> str | None:
+    """Normaliza código IBGE de município para 6 dígitos (sem dígito verificador).
+
+    Aceita "120020" (6), "1200203" (7 real: descarta o DV) e "0120020" (7 com zero
+    à esquerda vindo de zfill). Devolve None se não houver dígitos suficientes.
+    """
+    d = "".join(ch for ch in str(valor) if ch.isdigit())
+    if len(d) >= 7:
+        d = d[1:7] if d.startswith("0") else d[:6]
+    if len(d) < 6:
+        return None
+    return d
 
 
 def _aplicar_filtro_geo_final(df: pl.DataFrame, req: PipelineRequest) -> pl.DataFrame:
@@ -57,6 +71,8 @@ def _aplicar_filtro_geo_final(df: pl.DataFrame, req: PipelineRequest) -> pl.Data
     for c in (
         "CO_MUNICIPIO_GESTOR", "MUNICIPIO_GESTOR", "CO_MUNICIPIO",
         "municipio_cod", "cod_municipio_ibge",
+        # Município do ESTABELECIMENTO nos microdados brutos (SIH-RD/RJ, SIA-PA, SIH-SP)
+        "MUNIC_MOV", "PA_UFMUN", "SP_M_HOSP",
     ):
         if c in cols:
             col_mun = c
@@ -65,6 +81,14 @@ def _aplicar_filtro_geo_final(df: pl.DataFrame, req: PipelineRequest) -> pl.Data
     if col_uf and col_uf.startswith("CO_"):
         col_uf_ibge = col_uf
         col_uf = None
+    if not col_uf and not col_uf_ibge and not col_mun:
+        # Só CNES não permite resolver Macro/DRS (a função de geo não recebe CNES).
+        # Filtrar aqui zeraria TODAS as linhas; melhor não filtrar e avisar.
+        log.warn(
+            "Filtro Macro/DRS ignorado: dataset sem coluna de UF/municipio do estabelecimento",
+            colunas=cols[:12],
+        )
+        return df
 
     # (1) Extrai combinações únicas (máx ~5570 no Brasil inteiro)
     # NORMALIZA colunas de códigos para largura OFICIAL ANTES de extrair únicos:
@@ -116,7 +140,9 @@ def _aplicar_filtro_geo_final(df: pl.DataFrame, req: PipelineRequest) -> pl.Data
         if col_mun:
             v = uniq.item(i, col_mun)
             if v is not None:
-                mun = str(v).strip().zfill(7)
+                mun = _municipio_6dig(str(v))
+                if mun and not uf_s and not uf_ibge_2:
+                    uf_ibge_2 = mun[:2]
         _uf_f, _mun_f, co_macro, no_macro, co_drs, no_drs = resolve_geo_enrichment(
             uf_sigla=uf_s,
             co_uf_ibge_2dig=uf_ibge_2,
@@ -261,7 +287,9 @@ class BasePipeline:
         out_dir = ensure_dir(self.settings.output_dir)
         if req.save_csv:
             csv_path = out_dir / f"{name}.csv"
-            df.write_csv(csv_path, separator=";", null_value="")
+            # CSV segue o layout de exportação (rótulos do pacote R); o Parquet
+            # abaixo guarda o dataset analítico completo (colunas brutas + enriquecidas).
+            export_view(df, req.information_system).write_csv(csv_path, separator=";", null_value="")
             log.info("CSV salvo", path=str(csv_path))
         if req.save_parquet:
             parquet_path = out_dir / f"{name}.parquet"
@@ -502,7 +530,14 @@ class RemotePipeline(BasePipeline):
             progress.stage = f"Chunk {i}/{len(chunks)} - Leitura DBC"
             if progress_cb:
                 progress_cb(progress)
-            raw = read_many_dbc([str(p) for p in downloaded])
+            try:
+                raw = read_many_dbc([str(p) for p in downloaded])
+            except Exception as e:
+                # read_many_dbc agora FALHA explicitamente em vez de retornar vazio;
+                # aqui isolamos a falha do chunk (motivo fica no log) para que o
+                # resultado final vazio seja reportado como AVISO, não como sucesso.
+                log.warn("Falhou leitura DBC do chunk", i=i, err=str(e))
+                raw = pl.DataFrame()
 
             # Atualiza SIGTAP com versões encontradas nos dados
             ym_col = {"SIA": "PA_CMP", "SIH": "ANOMES_CMPT"}[data_source]
@@ -589,11 +624,23 @@ class RemotePipeline(BasePipeline):
             elapsed_seconds=elapsed,
         )
         self._warn_revoked(result)
+        if result.rows == 0:
+            warn_0 = (
+                "Nenhum registro lido: o resultado final ficou vazio. "
+                "Verifique a leitura/descompactacao dos arquivos DBC e os filtros informados."
+            )
+            result.warnings.append(warn_0)
+            log.warn(warn_0)
         if progress_cb:
             progress.current = progress.total
             progress.elapsed = elapsed
-            progress.stage = "Concluido"
-            progress.message = f"{result.rows} linhas em {elapsed:.1f}s"
+            if result.rows > 0:
+                progress.stage = "Concluido"
+                progress.message = f"{result.rows} linhas em {elapsed:.1f}s"
+            else:
+                # 0 linhas NUNCA e "Concluido" verde: reporta estado de AVISO (amarelo).
+                progress.stage = "Concluido com avisos"
+                progress.message = f"0 linhas lidas em {elapsed:.1f}s (nenhum registro encontrado)"
             progress_cb(progress)
         return result
 
@@ -670,7 +717,13 @@ class LocalPipeline(BasePipeline):
             progress.message = f"{len(chunk)} arquivo(s)"
             if progress_cb:
                 progress_cb(progress)
-            raw = read_many_dbc([str(p) for p in chunk])
+            try:
+                raw = read_many_dbc([str(p) for p in chunk])
+            except Exception as e:
+                # read_many_dbc agora FALHA explicitamente em vez de retornar vazio;
+                # isola a falha do chunk para reportar o resultado vazio como AVISO.
+                log.warn("Falhou leitura DBC do chunk local", i=i, err=str(e))
+                raw = pl.DataFrame()
 
             # Atualiza SIGTAP com versões encontradas
             data_source = _SYS_DATA_TYPE[req.information_system][0]
@@ -733,11 +786,23 @@ class LocalPipeline(BasePipeline):
             elapsed_seconds=elapsed,
         )
         self._warn_revoked(result)
+        if result.rows == 0:
+            warn_0 = (
+                "Nenhum registro lido: o resultado final ficou vazio. "
+                "Verifique a leitura/descompactacao dos arquivos DBC e os filtros informados."
+            )
+            result.warnings.append(warn_0)
+            log.warn(warn_0)
         if progress_cb:
             progress.current = progress.total
             progress.elapsed = elapsed
-            progress.stage = "Concluido"
-            progress.message = f"{result.rows} linhas em {elapsed:.1f}s"
+            if result.rows > 0:
+                progress.stage = "Concluido"
+                progress.message = f"{result.rows} linhas em {elapsed:.1f}s"
+            else:
+                # 0 linhas NUNCA e "Concluido" verde: reporta estado de AVISO (amarelo).
+                progress.stage = "Concluido com avisos"
+                progress.message = f"0 linhas lidas em {elapsed:.1f}s (nenhum registro encontrado)"
             progress_cb(progress)
         return result
 

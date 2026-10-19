@@ -12,6 +12,7 @@ Layout (Qt + pyqtgraph):
 from __future__ import annotations
 
 import math
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ except ImportError:  # pragma: no cover
     pg = None
     PlotWidget = Any  # type: ignore
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,7 +42,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -54,10 +54,13 @@ from papahr.logging_config import get_logger
 from papahr.db import get_db
 from papahr.ui.widgets import (
     ConcentricRingsMap,
+    DeferredSplitter,
     HospitalMapPoint,
     KpiCard,
     StatusBadge,
 )
+
+from papahr.ui import charts
 
 log = get_logger(__name__)
 
@@ -164,11 +167,24 @@ class DashboardPage(QWidget):
         # Fonte dos dados: "session" (df pipeline atual) | "duckdb" (persistido DuckDB)
         self._fonte_atual: str = "session"
         self._df_duckdb: pl.DataFrame | None = None
+        # Camada Medallion de origem: "GOLD_OTIMIZADO" | "SILVER_FALLBACK" | "SESSAO_PIPELINE" | ""
+        self._fonte_dados_camada: str = ""
         self._build_ui()
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _compact_combo(cbo: QComboBox, chars: int = 18) -> None:
+        """Combo que NÃO exige a largura do maior item (antes forçava a página a 2.300 px)."""
+        cbo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        cbo.setMinimumContentsLength(chars)
+        cbo.setMinimumWidth(120)
+        cbo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        cbo.setStyleSheet("padding:6px 10px;")
+
     def _build_ui(self) -> None:
         self.setObjectName("DashboardPage")
+        self.setAutoFillBackground(True)
+        self.setStyleSheet("QWidget#DashboardPage{background:#0F1A1C;}")
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
@@ -177,7 +193,7 @@ class DashboardPage(QWidget):
         head_card = QFrame()
         head_card.setStyleSheet("QFrame{background:#121C1E;border-radius:10px;border:1px solid #233539;}")
         h_layout = QVBoxLayout(head_card)
-        h_layout.setContentsMargins(14, 12, 14, 12)
+        h_layout.setContentsMargins(16, 16, 16, 16)
         h_layout.setSpacing(10)
 
         # Linha 0: Título + Status
@@ -202,7 +218,7 @@ class DashboardPage(QWidget):
         self.cbo_system.addItem("SIH-SP (Serviços Profissionais — AIH)", "SIH_SP")
         self.cbo_system.addItem("SIA-PA (Produção Ambulatorial)", "SIA_PA")
         self.cbo_system.setCurrentIndex(0)
-        self.cbo_system.setStyleSheet("padding:5px 8px; border-radius:8px; background:#162023; color:#E6FFFA;")
+        self._compact_combo(self.cbo_system, 22)
 
         self.chk_huff = QCheckBox("Modelo Huff")
         self.chk_huff.setChecked(True)
@@ -215,7 +231,7 @@ class DashboardPage(QWidget):
         self.cbo_beta.addItem("1.5 — Média Complexidade", 1.5)
         self.cbo_beta.addItem("0.9 — Alta Complexidade", 0.9)
         self.cbo_beta.setCurrentIndex(1)
-        self.cbo_beta.setStyleSheet("padding:5px 8px; border-radius:8px; background:#162023; color:#E6FFFA;")
+        self._compact_combo(self.cbo_beta, 16)
 
         self.btn_calc = QPushButton("⚡ Calcular")
         self.btn_calc.setMinimumWidth(110)
@@ -253,14 +269,14 @@ class DashboardPage(QWidget):
         self.cbo_fonte_dados = QComboBox()
         self.cbo_fonte_dados.addItem("🟢 Sessão Atual", "session")
         self.cbo_fonte_dados.addItem("💾 DuckDB — Dados Persistidos", "duckdb")
-        self.cbo_fonte_dados.setStyleSheet("padding:5px 8px; border-radius:8px; background:#162023; color:#E6FFFA;")
+        self._compact_combo(self.cbo_fonte_dados, 18)
         self.cbo_fonte_dados.currentIndexChanged.connect(self._on_fonte_dados_changed)
 
         lbl_carga = QLabel("🗂 Carga persistida:")
         lbl_carga.setStyleSheet("font-weight:600;color:#94A3B8;")
         self.cbo_load_runs = QComboBox()
         self.cbo_load_runs.addItem("⏳ Todas as cargas", None)
-        self.cbo_load_runs.setStyleSheet("padding:5px 8px; border-radius:8px; background:#162023; color:#E6FFFA;")
+        self._compact_combo(self.cbo_load_runs, 16)
         self.cbo_load_runs.setEnabled(False)
 
         self.btn_reload_fonte = QPushButton("🔄 Recarregar")
@@ -272,15 +288,31 @@ class DashboardPage(QWidget):
         )
         self.btn_reload_fonte.clicked.connect(self._on_reload_fonte_clicked)
 
+        self.btn_load_files = QPushButton("📂 Carregar arquivos")
+        self.btn_load_files.setMinimumWidth(170)
+        self.btn_load_files.setMinimumHeight(32)
+        self.btn_load_files.setStyleSheet(
+            "QPushButton{background:#233539;color:#E6FFFA;padding:6px 12px;border-radius:8px;border:1px solid #2D4A4A;}"
+            "QPushButton:hover{background:#2D4A4A;color:#FEF08A;}"
+        )
+        self.btn_load_files.setToolTip(
+            "Carrega CSV, Parquet, DBF ou DBC (DBF/DBC via leitor DATASUS)."
+        )
+        self.btn_load_files.clicked.connect(self._on_load_files)
+
         self.lbl_fonte_info = QLabel("Fonte: sessão atual | 0 linhas")
         self.lbl_fonte_info.setStyleSheet("color:#8FA6A3;font-weight:600;padding-left:6px;")
+        self._badge_fonte_camada = StatusBadge("Camada: —", status="info")
 
         row2.addWidget(lbl_fonte); row2.addWidget(self.cbo_fonte_dados)
         row2.addSpacing(10)
         row2.addWidget(lbl_carga); row2.addWidget(self.cbo_load_runs)
         row2.addWidget(self.btn_reload_fonte)
+        row2.addSpacing(10)
+        row2.addWidget(self.btn_load_files)
         row2.addStretch(1)
         row2.addWidget(self.lbl_fonte_info)
+        row2.addWidget(self._badge_fonte_camada)
         h_layout.addLayout(row2)
 
         root.addWidget(head_card)
@@ -297,11 +329,11 @@ class DashboardPage(QWidget):
         kpi_grid.setSpacing(10)
         kpis = [self.kpi_estabs, self.kpi_prod, self.kpi_valor,
                  self.kpi_icsap, self.kpi_los, self.kpi_readm]
-        for col in range(3):
+        # KPI cards em UMA linha de 6 (cabe em 1366 px; cada card ~210 px)
+        for col in range(6):
             kpi_grid.setColumnStretch(col, 1)
         for idx, k in enumerate(kpis):
-            k.setMaximumWidth(300)
-            row, col = divmod(idx, 3)
+            row, col = divmod(idx, 6)
             kpi_grid.addWidget(k, row, col)
         root.addLayout(kpi_grid)
 
@@ -312,41 +344,91 @@ class DashboardPage(QWidget):
                          border-top-left-radius:10px;border-top-right-radius:10px;margin-right:4px;}
             QTabBar::tab:selected{background:#1B2B2F;color:#4FD1C5;border-bottom:2px solid #4FD1C5;}
             QTabWidget::pane{border:1px solid #233539;border-radius:12px;top:-1px;}""")
-        self.tabs.addTab(self._build_tab_risco(),   "🎯 Risco e Demanda")
-        self.tabs.addTab(self._build_tab_efic(),    "💎 Eficiência Clínica")
-        self.tabs.addTab(self._build_tab_terr(),    "🗺️ Território / Huff")
-        self.tabs.addTab(self._build_tab_trans(),   "🔁 Transição de Cuidado")
-        self.tabs.addTab(self._build_tab_geral(),   "🧭 Visão Geral")
-        self.tabs.addTab(self._build_tab_bench(),   "🏁 Benchmarking Hospitalar")
-        self.tabs.addTab(self._build_tab_glosas(),  "💸 Glosas e Não Pagamentos")
+        self.tabs.addTab(self._scroll(self._build_tab_risco()),   "🎯 Risco e Demanda")
+        self.tabs.addTab(self._scroll(self._build_tab_efic()),    "💎 Eficiência Clínica")
+        self.tabs.addTab(self._scroll(self._build_tab_terr()),    "🗺️ Território / Huff")
+        self.tabs.addTab(self._scroll(self._build_tab_trans()),   "🔁 Transição de Cuidado")
+        self.tabs.addTab(self._scroll(self._build_tab_geral()),   "🧭 Visão Geral")
+        self.tabs.addTab(self._scroll(self._build_tab_bench()),   "🏁 Benchmarking Hospitalar")
+        self.tabs.addTab(self._scroll(self._build_tab_glosas()),  "💸 Glosas e Não Pagamentos")
         root.addWidget(self.tabs, 1)
+        self.tabs.currentChanged.connect(lambda _i: QTimer.singleShot(0, self._resync_plots))
+
+    def _resync_plots(self) -> None:
+        """Realinha a cena de cada PlotWidget ao tamanho atual do widget.
+
+        Quando o gráfico é preenchido numa aba oculta (ou o splitter muda de tamanho
+        depois), o GraphicsView fica com a cena do tamanho antigo e o gráfico aparece
+        cortado à direita. Reaplicar o range do viewport corrige sem redesenhar dados.
+        """
+        if pg is None:
+            return
+        try:
+            for pw in self.findChildren(pg.PlotWidget):
+                charts.relayout(pw)
+        except Exception as _e:  # noqa: BLE001
+            log.debug("resync_plots: %s", _e)
+
+    def _refresh_scroll_heights(self) -> None:
+        """Depois de preencher, o conteúdo de cada aba assume a altura mínima real do layout."""
+        try:
+            for i in range(self.tabs.count()):
+                sa = self.tabs.widget(i)
+                inner = sa.widget() if isinstance(sa, QScrollArea) else None
+                if inner is None or inner.layout() is None:
+                    continue
+                inner.layout().activate()
+                h = max(560, inner.layout().minimumSize().height())
+                inner.setMinimumHeight(h)
+        except Exception as _e:  # noqa: BLE001
+            log.debug("refresh_scroll_heights: %s", _e)
+        self._resync_plots()
+
+    @staticmethod
+    def _scroll(inner: QWidget) -> QScrollArea:
+        """Área rolável vertical (nunca horizontal) para o conteúdo de uma aba."""
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sa.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sa.setStyleSheet("QScrollArea{background:#0F1A1C;border:none;}"
+                         "QScrollArea > QWidget > QWidget{background:#0F1A1C;}")
+        sa.viewport().setAutoFillBackground(False)
+        inner.setMinimumHeight(max(inner.minimumSizeHint().height(), 560))
+        sa.setWidget(inner)
+        return sa
 
     # ------------------------------------------------------------------
     # Abas
     # ------------------------------------------------------------------
     def _build_tab_risco(self) -> QWidget:
-        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(10)
-        self.plot_estratos = self._mk_plot_widget("Estratos de Risco — % Casos")
-        self.plot_cmi = self._mk_plot_widget("Case Mix Index (CMI) por Hospital")
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(16, 16, 16, 16); l.setSpacing(10)
+        self.plot_estratos = self._mk_plot_widget("Estratos de risco por hospital (% dos casos)")
+        self.plot_cmi = self._mk_plot_widget("Case Mix Index (CMI) por hospital")
         self.tbl_risco = self._mk_table()
-        spl = QSplitter(Qt.Vertical)
-        spl.setChildrenCollapsible(False)
-        spl.setHandleWidth(4)
-        spl.addWidget(self.plot_estratos); spl.addWidget(self.plot_cmi); spl.addWidget(self.tbl_risco)
-        spl.setSizes([180, 180, 300])
+        top = DeferredSplitter(Qt.Horizontal, [720, 560])
+        top.setChildrenCollapsible(False); top.setHandleWidth(4)
+        top.addWidget(self.plot_estratos); top.addWidget(self.plot_cmi)
+        spl = DeferredSplitter(Qt.Vertical, [400, 260])
+        spl.setChildrenCollapsible(False); spl.setHandleWidth(4)
+        spl.addWidget(top)
+        spl.addWidget(self._mk_group("Estratificação de risco por hospital", self.tbl_risco))
         l.addWidget(spl, 1)
         return w
 
     def _build_tab_efic(self) -> QWidget:
-        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(10)
-        self.plot_los = self._mk_plot_widget("Tempo Permanência: Observado vs Esperado (O/E)")
-        self.plot_custo = self._mk_plot_widget("Custo Médio x Benchmark (O/E)")
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(16, 16, 16, 16); l.setSpacing(10)
+        self.plot_los = self._mk_plot_widget("Permanência observada / esperada (O/E)")
+        self.plot_custo = self._mk_plot_widget("Custo médio / benchmark (O/E)")
         self.tbl_efic = self._mk_table()
-        spl = QSplitter(Qt.Vertical)
-        spl.setChildrenCollapsible(False)
-        spl.setHandleWidth(4)
-        spl.addWidget(self.plot_los); spl.addWidget(self.plot_custo); spl.addWidget(self.tbl_efic)
-        spl.setSizes([180, 180, 300])
+        top = DeferredSplitter(Qt.Horizontal, [640, 640])
+        top.setChildrenCollapsible(False); top.setHandleWidth(4)
+        top.addWidget(self.plot_los); top.addWidget(self.plot_custo)
+        spl = DeferredSplitter(Qt.Vertical, [400, 260])
+        spl.setChildrenCollapsible(False); spl.setHandleWidth(4)
+        spl.addWidget(top)
+        spl.addWidget(self._mk_group("Eficiência clínica por hospital", self.tbl_efic))
         l.addWidget(spl, 1)
         return w
 
@@ -360,66 +442,59 @@ class DashboardPage(QWidget):
         filter_bar.setStyleSheet(
             "QFrame{background:#121C1E;border-radius:10px;border:1px solid #233539;}"
         )
-        fb_l = QHBoxLayout(filter_bar)
-        fb_l.setContentsMargins(16, 12, 16, 12)
-        fb_l.setSpacing(12)
+        fb_l = QGridLayout(filter_bar)
+        fb_l.setContentsMargins(16, 10, 16, 10)
+        fb_l.setHorizontalSpacing(10); fb_l.setVerticalSpacing(8)
 
-        lbl_map_tip = QLabel("🗺️ Mapa de anéis concêntricos (taxa internação / 1000 hab)")
+        lbl_map_tip = QLabel("🗺️ Mapa de anéis concêntricos — taxa de internação por 1.000 hab. ao redor de cada hospital")
         lbl_map_tip.setStyleSheet("color:#4FD1C5;font-weight:700;")
-        fb_l.addWidget(lbl_map_tip, 1)
+        lbl_map_tip.setWordWrap(True)
+        self.lbl_map_hover = StatusBadge("Selecione um hospital no mapa", status="info")
+        fb_l.addWidget(lbl_map_tip, 0, 0, 1, 5)
+        fb_l.addWidget(self.lbl_map_hover, 0, 5)
 
-        fb_l.addWidget(QLabel("Agrupar por:"))
         self.cbo_map_group = QComboBox()
         self.cbo_map_group.addItem("Grupo SIGTAP", "grupo")
         self.cbo_map_group.addItem("Forma de Organização", "forma")
         self.cbo_map_group.addItem("Procedimento (código/nome)", "procedimento")
-        self.cbo_map_group.setStyleSheet("min-width:220px;padding:6px 10px;")
+        self._compact_combo(self.cbo_map_group, 16)
         self.cbo_map_group.currentIndexChanged.connect(self._on_map_group_changed)
-        fb_l.addWidget(self.cbo_map_group)
 
-        fb_l.addWidget(QLabel("Filtrar item:"))
         self.cbo_map_filter = QComboBox()
         self.cbo_map_filter.addItem("🔎 Todos (agregado geral)", None)
-        self.cbo_map_filter.setStyleSheet("min-width:300px;padding:6px 10px;")
+        self._compact_combo(self.cbo_map_filter, 24)
         self.cbo_map_filter.currentIndexChanged.connect(self._on_map_filter_changed)
-        fb_l.addWidget(self.cbo_map_filter, 1)
 
-        self.lbl_map_hover = StatusBadge("Selecione um hospital no mapa", status="info")
-        fb_l.addWidget(self.lbl_map_hover)
+        self.cbo_map_radii = QComboBox()
+        self.cbo_map_radii.addItem("5 anéis padrão (5,10,20,40,80 km)", (5.0, 10.0, 20.0, 40.0, 80.0))
+        self.cbo_map_radii.addItem("Curto alcance (3,6,12,25,50 km)", (3.0, 6.0, 12.0, 25.0, 50.0))
+        self.cbo_map_radii.addItem("Longo alcance (10,20,40,80,160 km)", (10.0, 20.0, 40.0, 80.0, 160.0))
+        self._compact_combo(self.cbo_map_radii, 18)
+        self.cbo_map_radii.currentIndexChanged.connect(self._on_map_radii_changed)
 
+        fb_l.addWidget(QLabel("Agrupar por:"), 1, 0)
+        fb_l.addWidget(self.cbo_map_group, 1, 1)
+        fb_l.addWidget(QLabel("Filtrar item:"), 1, 2)
+        fb_l.addWidget(self.cbo_map_filter, 1, 3)
+        fb_l.addWidget(QLabel("Anéis:"), 1, 4)
+        fb_l.addWidget(self.cbo_map_radii, 1, 5)
+        fb_l.setColumnStretch(3, 2); fb_l.setColumnStretch(1, 1); fb_l.setColumnStretch(5, 1)
         l.addWidget(filter_bar)
 
         # -----------------------------
-        # Container Mapa: label "Camada:" + combobox + mapa
+        # Container Mapa
         # -----------------------------
         map_container = QFrame()
-        map_container.setStyleSheet(
-            "QFrame{background:transparent;border:none;}"
-        )
+        map_container.setStyleSheet("QFrame{background:transparent;border:none;}")
         mc_l = QVBoxLayout(map_container)
         mc_l.setContentsMargins(0, 0, 0, 0)
         mc_l.setSpacing(8)
 
-        layer_bar = QHBoxLayout()
-        layer_bar.setContentsMargins(0, 0, 0, 0)
-        layer_bar.setSpacing(8)
-        lbl_layer = QLabel("Camada:")
-        lbl_layer.setStyleSheet("color:#94A3B8;font-weight:600;font-size:12px;")
-        layer_bar.addWidget(lbl_layer)
-        self.cbo_map_radii = QComboBox()
-        self.cbo_map_radii.addItem("— 5 anéis padrão (5,10,20,40,80 km)", (5.0, 10.0, 20.0, 40.0, 80.0))
-        self.cbo_map_radii.addItem("Curto alcance (3,6,12,25,50 km)", (3.0, 6.0, 12.0, 25.0, 50.0))
-        self.cbo_map_radii.addItem("Longo alcance (10,20,40,80,160 km)", (10.0, 20.0, 40.0, 80.0, 160.0))
-        self.cbo_map_radii.setStyleSheet("min-width:280px;padding:6px 10px;")
-        self.cbo_map_radii.currentIndexChanged.connect(self._on_map_radii_changed)
-        layer_bar.addWidget(self.cbo_map_radii)
-        layer_bar.addStretch(1)
-        mc_l.addLayout(layer_bar)
-
         # Splitter principal: mapa + ICSAP
-        spl_top = QSplitter(Qt.Horizontal)
+        spl_top = DeferredSplitter(Qt.Horizontal, [760, 460])
         spl_top.setChildrenCollapsible(False)
         spl_top.setHandleWidth(4)
+        spl_top.setMinimumHeight(420)
 
         # Mapa concêntrico
         self.concentric_map = ConcentricRingsMap()
@@ -429,7 +504,6 @@ class DashboardPage(QWidget):
         # ICSAP por condição (mantido)
         self.plot_icsap = self._mk_plot_widget("Internações por Condição Sensível à APS (ICSAP)")
         spl_top.addWidget(self.plot_icsap)
-        spl_top.setSizes([720, 400])
         mc_l.addWidget(spl_top, 1)
 
         l.addWidget(map_container, 2)
@@ -453,47 +527,47 @@ class DashboardPage(QWidget):
         decay_bar.setStyleSheet(
             "QFrame{background:#121C1E;border-radius:10px;border:1px solid #233539;}"
         )
-        dbl = QHBoxLayout(decay_bar)
-        dbl.setContentsMargins(16, 12, 16, 12); dbl.setSpacing(12)
-        dbl.addWidget(QLabel("📉 Curva Decaimento — Hosp:"))
+        dbl = QGridLayout(decay_bar)
+        dbl.setContentsMargins(16, 10, 16, 10); dbl.setHorizontalSpacing(10); dbl.setVerticalSpacing(6)
+        dbl.addWidget(QLabel("📉 Curva de decaimento — hospital:"), 0, 0)
         self.cbo_decay_hospital = QComboBox()
-        self.cbo_decay_hospital.setStyleSheet("min-width:360px;padding:6px 10px;")
+        self._compact_combo(self.cbo_decay_hospital, 30)
         self.cbo_decay_hospital.currentIndexChanged.connect(self._on_decay_hospital_changed)
-        dbl.addWidget(self.cbo_decay_hospital, 1)
+        dbl.addWidget(self.cbo_decay_hospital, 0, 1)
         self.lbl_decay_params = QLabel(
             "Ajuste exponencial: y = A · exp(−λ · km)   λ = ——   R² = ——   DMP (km) = ——")
         self.lbl_decay_params.setStyleSheet("color:#4FD1C5;font-weight:600;")
-        dbl.addWidget(self.lbl_decay_params, 2)
+        self.lbl_decay_params.setWordWrap(True)
+        dbl.addWidget(self.lbl_decay_params, 1, 0, 1, 2)
+        dbl.setColumnStretch(1, 1)
         l.addWidget(decay_bar)
 
         self.tbl_distance_decay = self._mk_table()
         self.plot_distance_decay = self._mk_plot_widget(
             "Curva de Decaimento: Taxa Internação / 1000 hab × Distância (km)"
         )
-        spl_decay = QSplitter(Qt.Horizontal)
+        spl_decay = DeferredSplitter(Qt.Horizontal, [620, 520])
         spl_decay.setChildrenCollapsible(False)
         spl_decay.setHandleWidth(4)
         spl_decay.addWidget(self.plot_distance_decay)
         spl_decay.addWidget(self.tbl_distance_decay)
-        spl_decay.setSizes([620, 520])
         l.addWidget(spl_decay, 2)
 
         return w
 
     def _build_tab_trans(self) -> QWidget:
-        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(10)
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(16, 16, 16, 16); l.setSpacing(10)
         self.plot_trans = self._mk_plot_widget("% Contato 48h (verde) vs % Readmissão 30d (vermelho)")
         self.tbl_trans = self._mk_table()
-        spl = QSplitter(Qt.Vertical)
+        spl = DeferredSplitter(Qt.Vertical, [260, 400])
         spl.setChildrenCollapsible(False)
         spl.setHandleWidth(4)
         spl.addWidget(self.plot_trans); spl.addWidget(self.tbl_trans)
-        spl.setSizes([260, 400])
         l.addWidget(spl, 1)
         return w
 
     def _build_tab_geral(self) -> QWidget:
-        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(10)
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(16, 16, 16, 16); l.setSpacing(10)
         self.plot_ts = self._mk_plot_widget("Série Temporal — Internações (barra) e Taxa ICSAP (linha)")
         self.tbl_alerts = self._mk_table()
         self.tbl_top10_p = self._mk_table()
@@ -502,43 +576,38 @@ class DashboardPage(QWidget):
         h.addWidget(self._mk_group("🚨 Alertas Operacionais", self.tbl_alerts), 1)
         h.addWidget(self._mk_group("🥇 Top-10 Procedimentos", self.tbl_top10_p), 1)
         h.addWidget(self._mk_group("🏆 Top-10 Especialidades/CBO", self.tbl_top10_e), 1)
-        spl = QSplitter(Qt.Vertical)
+        spl = DeferredSplitter(Qt.Vertical, [260, 380])
         spl.setChildrenCollapsible(False)
         spl.setHandleWidth(4)
         spl.addWidget(self.plot_ts)
         w2 = QWidget(); w2.setLayout(h); spl.addWidget(w2)
-        spl.setSizes([260, 380])
         l.addWidget(spl, 1)
         return w
 
     def _build_tab_bench(self) -> QWidget:
         """Nova aba: Benchmarking Hospitalar (1 hospital escolhido vs 4 níveis geográficos)."""
-        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(10)
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(16, 16, 16, 16); l.setSpacing(10)
 
-        # Barra superior de seleção
+        # Barra superior de seleção (grade de 2 linhas: cabe em 1366 px)
         sel_bar = QFrame()
         sel_bar.setStyleSheet(
             "QFrame{background:#121C1E;border-radius:10px;border:1px solid #233539;}")
-        sbl = QHBoxLayout(sel_bar)
-        sbl.setContentsMargins(12, 10, 12, 10); sbl.setSpacing(14)
-        sbl.addWidget(QLabel("🏥 Hospital selecionado:"))
-        self.cbo_bench_hospital = QComboBox()
-        self.cbo_bench_hospital.setStyleSheet("min-width:460px;padding:7px 10px;")
-        self.cbo_bench_hospital.currentIndexChanged.connect(self._on_bench_changed)
-        sbl.addWidget(self.cbo_bench_hospital, 2)
+        sbl = QGridLayout(sel_bar)
+        sbl.setContentsMargins(16, 10, 16, 10); sbl.setHorizontalSpacing(12); sbl.setVerticalSpacing(8)
 
-        sbl.addWidget(QLabel("🌐 Nível geográfico comparativo:"))
+        self.cbo_bench_hospital = QComboBox()
+        self._compact_combo(self.cbo_bench_hospital, 30)
+        self.cbo_bench_hospital.currentIndexChanged.connect(self._on_bench_changed)
+
         self.cbo_bench_level = QComboBox()
         self.cbo_bench_level.addItem("1. Mesmo Município (ibge 6-7 dígitos)", "nivel_municipio")
         self.cbo_bench_level.addItem("2. Microrregião (5 dígitos IBGE)", "nivel_micro")
         self.cbo_bench_level.addItem("3. Macrorregião (3 dígitos IBGE)", "nivel_macro")
         self.cbo_bench_level.addItem("4. Mesmo Estado (UF — 2 dígitos)", "nivel_uf")
         self.cbo_bench_level.setCurrentIndex(3)   # default: UF (maior amostra)
-        self.cbo_bench_level.setStyleSheet("min-width:340px;padding:7px 10px;")
+        self._compact_combo(self.cbo_bench_level, 20)
         self.cbo_bench_level.currentIndexChanged.connect(self._on_bench_changed)
-        sbl.addWidget(self.cbo_bench_level, 2)
 
-        sbl.addWidget(QLabel("📈 Indicador principal:"))
         self.cbo_bench_ind = QComboBox()
         self.cbo_bench_ind.addItem("% ICSAP (evitáveis)", "icsap_pct")
         self.cbo_bench_ind.addItem("LOS médio (dias)", "los_medio_dias")
@@ -548,15 +617,22 @@ class DashboardPage(QWidget):
         self.cbo_bench_ind.addItem("Custo O/E (eficiência)", "custo_oe")
         self.cbo_bench_ind.addItem("LOS O/E (tempo x benchmark)", "los_o_e")
         self.cbo_bench_ind.addItem("% Casos ALTO risco", "pct_alto")
-        self.cbo_bench_ind.setStyleSheet("min-width:300px;padding:7px 10px;")
+        self._compact_combo(self.cbo_bench_ind, 20)
         self.cbo_bench_ind.currentIndexChanged.connect(self._on_bench_changed)
-        sbl.addWidget(self.cbo_bench_ind, 2)
 
         self.lbl_bench_summary = QLabel(
             "Hospital: ——   Nível geográfico: ——   Comparando com —— hospitais.")
         self.lbl_bench_summary.setStyleSheet("color:#4FD1C5;font-weight:700;")
-        sbl.addStretch(1)
-        sbl.addWidget(self.lbl_bench_summary, 3)
+        self.lbl_bench_summary.setWordWrap(True)
+
+        sbl.addWidget(QLabel("🏥 Hospital selecionado:"), 0, 0)
+        sbl.addWidget(self.cbo_bench_hospital, 0, 1, 1, 3)
+        sbl.addWidget(QLabel("🌐 Nível comparativo:"), 1, 0)
+        sbl.addWidget(self.cbo_bench_level, 1, 1)
+        sbl.addWidget(QLabel("📈 Indicador:"), 1, 2)
+        sbl.addWidget(self.cbo_bench_ind, 1, 3)
+        sbl.addWidget(self.lbl_bench_summary, 2, 0, 1, 4)
+        sbl.setColumnStretch(1, 1); sbl.setColumnStretch(3, 1)
         l.addWidget(sel_bar)
 
         # 2 gráficos + tabela
@@ -567,25 +643,23 @@ class DashboardPage(QWidget):
             "Scatter: efeito conjunto (X=% ICSAP, Y=LOS médio dias) — o hospital selecionado é a cor VERDE"
         )
         self.tbl_bench = self._mk_table()
-        spl_top = QSplitter(Qt.Horizontal)
+        spl_top = DeferredSplitter(Qt.Horizontal, [600, 600])
         spl_top.setChildrenCollapsible(False)
         spl_top.setHandleWidth(4)
         spl_top.addWidget(self.plot_bench_bar)
         spl_top.addWidget(self.plot_bench_scatter)
-        spl_top.setSizes([600, 600])
-        spl_full = QSplitter(Qt.Vertical)
+        spl_full = DeferredSplitter(Qt.Vertical, [300, 420])
         spl_full.setChildrenCollapsible(False)
         spl_full.setHandleWidth(4)
         spl_full.addWidget(spl_top)
         spl_full.addWidget(self.tbl_bench)
-        spl_full.setSizes([300, 420])
         l.addWidget(spl_full, 1)
 
         return w
 
     def _build_tab_glosas(self) -> QWidget:
         """Nova aba: Glosas e Não Pagamentos (causas + série histórica)."""
-        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(10, 10, 10, 10); l.setSpacing(10)
+        w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(16, 16, 16, 16); l.setSpacing(10)
 
         # Header com KPIs rápidos de glosa — tamanhos mínimos p/ não sobrepor
         kpi_row = QHBoxLayout(); kpi_row.setSpacing(8)
@@ -606,12 +680,11 @@ class DashboardPage(QWidget):
         self.plot_glosas_serie = self._mk_plot_widget(
             "Série histórica: barras = Nº glosadas | linha = % valor glosado ($)"
         )
-        spl_plots = QSplitter(Qt.Horizontal)
+        spl_plots = DeferredSplitter(Qt.Horizontal, [620, 660])
         spl_plots.setChildrenCollapsible(False)
         spl_plots.setHandleWidth(4)
         spl_plots.addWidget(self.plot_glosas_causas); spl_plots.addWidget(self.plot_glosas_serie)
         spl_plots.setStretchFactor(0, 1); spl_plots.setStretchFactor(1, 1)
-        spl_plots.setSizes([620, 660])
         spl_plots.setCollapsible(0, False); spl_plots.setCollapsible(1, False)
         spl_plots.setMinimumHeight(280)
 
@@ -620,20 +693,18 @@ class DashboardPage(QWidget):
         self.tbl_glosas_serie = self._mk_table()
         grp_causas = self._mk_group("📋 Causas de glosa — ocorrências e R$", self.tbl_glosas_causas)
         grp_serie = self._mk_group("📅 Série histórica de glosas", self.tbl_glosas_serie)
-        spl_tabs = QSplitter(Qt.Horizontal)
+        spl_tabs = DeferredSplitter(Qt.Horizontal, [620, 660])
         spl_tabs.setChildrenCollapsible(False)
         spl_tabs.setHandleWidth(4)
         spl_tabs.addWidget(grp_causas); spl_tabs.addWidget(grp_serie)
         spl_tabs.setStretchFactor(0, 1); spl_tabs.setStretchFactor(1, 1)
-        spl_tabs.setSizes([620, 660])
         spl_tabs.setCollapsible(0, False); spl_tabs.setCollapsible(1, False)
         spl_tabs.setMinimumHeight(260)
 
-        spl_full = QSplitter(Qt.Vertical)
+        spl_full = DeferredSplitter(Qt.Vertical, [330, 380])
         spl_full.setChildrenCollapsible(False)
         spl_full.setHandleWidth(4)
         spl_full.addWidget(spl_plots); spl_full.addWidget(spl_tabs)
-        spl_full.setSizes([330, 380])
         spl_full.setCollapsible(0, False); spl_full.setCollapsible(1, False)
         l.addWidget(spl_full, 1)
 
@@ -648,12 +719,8 @@ class DashboardPage(QWidget):
             ql.setAlignment(Qt.AlignCenter); ql.setFrameShape(QFrame.StyledPanel)
             return ql
         plt: PlotWidget = pg.PlotWidget()
-        plt.setTitle(title, color=_TXT, size="10pt")
-        plt.getAxis("left").setPen(_pen(_TXT_DIM)); plt.getAxis("bottom").setPen(_pen(_TXT_DIM))
-        plt.getAxis("left").setTextPen(_TXT_DIM); plt.getAxis("bottom").setTextPen(_TXT_DIM)
-        plt.setBackground(_BG)
-        plt.showGrid(x=False, y=True, alpha=0.2)
-        plt.setMinimumHeight(180)
+        charts.style_plot(plt, title)
+        plt.setMinimumHeight(220)
         return plt
 
     def _mk_table(self) -> QTableWidget:
@@ -667,6 +734,7 @@ class DashboardPage(QWidget):
                                  font-weight:600;}""")
         t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         t.horizontalHeader().setStretchLastSection(True)
+        t.setMinimumHeight(160)
         t.setAlternatingRowColors(True)
         t.verticalHeader().setVisible(False)
         t.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -679,7 +747,7 @@ class DashboardPage(QWidget):
             QGroupBox{border:1px solid #233539;border-radius:10px;margin-top:16px;
                       color:#4FD1C5;font-weight:600;padding:8px;}
             QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px 0 6px;}""")
-        lv = QVBoxLayout(gb); lv.setContentsMargins(8, 18, 8, 8)
+        lv = QVBoxLayout(gb); lv.setContentsMargins(16, 18, 16, 16)
         lv.addWidget(inner)
         return gb
 
@@ -702,6 +770,7 @@ class DashboardPage(QWidget):
         self.cbo_fonte_dados.setCurrentIndex(0)
         self.cbo_fonte_dados.blockSignals(False)
         self._fonte_atual = "session"
+        self._fonte_dados_camada = "SESSAO_PIPELINE"
         self.cbo_load_runs.setEnabled(False)
 
         # Ajusta combo de sistema
@@ -742,6 +811,10 @@ class DashboardPage(QWidget):
                     hosp = self._last_df[cols[0]].n_unique()
                     extra = f" | {hosp} hospitais"
             self.lbl_fonte_info.setText(f"Fonte: sessão atual (pipeline) | {n:,} linhas{extra}")
+        try:
+            self._update_badge_fonte_camada()
+        except Exception:
+            pass
 
     def _refresh_load_runs(self) -> None:
         """Popula combo_cargas com as últimas runs do bronze.load_runs."""
@@ -814,6 +887,15 @@ class DashboardPage(QWidget):
         try:
             db = get_db()
             load_run_id: str | None = self.cbo_load_runs.currentData()
+            # Fallback Medallion (P3-R4): GOLD otimizado se aggr_mensal_hospital populado,
+            # senão SILVER_FALLBACK transparente (silver.producao como detalhe).
+            gold_ok = self._gold_aggr_has_rows()
+            self._fonte_dados_camada = "GOLD_OTIMIZADO" if gold_ok else "SILVER_FALLBACK"
+            if not gold_ok:
+                log.warning(
+                    "[Fallback-P3R4] gold.aggr_mensal_hospital VAZIO ou inexistente. "
+                    "Fallback automático → silver.producao (transparente para usuário)."
+                )
             if load_run_id:
                 # Carregamento filtrado por load_run_id
                 params: list = [load_run_id]
@@ -846,22 +928,66 @@ class DashboardPage(QWidget):
                 self._df_duckdb = db.sql_to_polars(sql, params)
             else:
                 self._df_duckdb = db.load_silver_production()
+            if self._df_duckdb is not None and not self._df_duckdb.is_empty():
+                self._df_duckdb = self._df_duckdb.with_columns(
+                    pl.lit(self._fonte_dados_camada).alias("_fonte_dados")
+                )
             self._last_system = "SIA_PA"
             self._last_cnes = None
             self._update_fonte_info_label()
-            self.lbl_status.set_status(
-                f"DuckDB carregado: {self._df_duckdb.height:,} linhas ✓",
-                "ok",
-            )
+            if gold_ok:
+                self.lbl_status.set_status(
+                    f"DuckDB [GOLD⚡]: {self._df_duckdb.height:,} linhas ✓",
+                    "ok",
+                )
+            else:
+                self.lbl_status.set_status(
+                    f"DuckDB [SILVER↩ fallback]: {self._df_duckdb.height:,} linhas (gold vazio)",
+                    "warn",
+                )
         except Exception as e:
             self._df_duckdb = None
+            self._fonte_dados_camada = ""
             log.error("Falha ao carregar DuckDB: %s", e)
             self.lbl_status.set_status(f"Erro DuckDB: {type(e).__name__}", "error")
+            try:
+                self._update_badge_fonte_camada()
+            except Exception:
+                pass
             QMessageBox.warning(
                 self, "Sem dados no DuckDB",
                 f"Não foi possível carregar dados persistidos:\n\n{type(e).__name__}: {str(e)[:300]}\n\n"
                 "Execute um pipeline (Wizard) primeiro para gravar dados no DuckDB."
             )
+
+    def _gold_aggr_has_rows(self) -> bool:
+        """Retorna True se gold.aggr_mensal_hospital existir E tiver > 0 linhas."""
+        try:
+            db = get_db()
+            r = db.sql_to_polars(
+                "SELECT COUNT(*) AS n FROM information_schema.tables "
+                "WHERE table_schema = 'gold' AND table_name = 'aggr_mensal_hospital'"
+            )
+            if r.is_empty() or int(r[0, "n"]) == 0:
+                return False
+            rows = db.sql_to_polars("SELECT COUNT(*) AS n FROM gold.aggr_mensal_hospital")
+            return (not rows.is_empty()) and int(rows[0, "n"]) > 0
+        except Exception:
+            return False
+
+    def _update_badge_fonte_camada(self) -> None:
+        badge = getattr(self, "_badge_fonte_camada", None)
+        if badge is None:
+            return
+        fonte = self._fonte_dados_camada or ""
+        if fonte == "GOLD_OTIMIZADO":
+            badge.set_status("Camada: GOLD ⚡ Otimizado", "ok")
+        elif fonte == "SILVER_FALLBACK":
+            badge.set_status("Camada: SILVER ↩ Fallback", "warn")
+        elif fonte == "SESSAO_PIPELINE":
+            badge.set_status("Camada: Sessão Pipeline", "info")
+        else:
+            badge.set_status("Camada: —", "info")
 
     def try_auto_persisted_fallback(self) -> bool:
         """Chamado após login: se sem sessão E há DuckDB com dados → carrega automaticamente.
@@ -950,315 +1076,353 @@ class DashboardPage(QWidget):
             try:
                 fn(m)
             except Exception as exc:
+                print(f"[!!!] EXCECAO {name}: {type(exc).__name__}: {exc}", flush=True)
+                traceback.print_exc()
                 log.error("Erro ao popular %s no Dashboard: %s", name, exc, exc_info=True)
         self.lbl_status.set_status("Dashboard atualizado com sucesso ✓", "ok")
+        self._refresh_scroll_heights()
+        QTimer.singleShot(0, self._refresh_scroll_heights)
 
     # ------------------------------------------------------------------
     def _fill_kpis(self, m: DashboardMetrics) -> None:
-        k = m.kpis
-        self.kpi_estabs.set_value(int(k.get("n_estabelecimentos", 0)))
-        self.kpi_prod.set_value(int(k.get("n_aihs_ou_apacs", 0)))
-        self.kpi_valor.set_value(float(k.get("valor_total_R$", 0.0)))
-        self.kpi_icsap.set_value(float(k.get("icsap_pct", 0.0)))
-        self.kpi_los.set_value(float(k.get("dias_permanencia_total", 0.0))
-                                / max(1, int(k.get("n_aihs_ou_apacs", 1)))
-                                if k.get("n_aihs_ou_apacs", 0) > 0 else 0.0)
-        self.kpi_readm.set_value(float(k.get("readmissao_30d_est_pct", 0.0)))
+        try:
+            k = m.kpis
+            self.kpi_estabs.set_value(int(k.get("n_estabelecimentos", 0)))
+            self.kpi_prod.set_value(int(k.get("n_aihs_ou_apacs", 0)))
+            self.kpi_valor.set_value(float(k.get("valor_total_R$", 0.0)))
+            self.kpi_icsap.set_value(float(k.get("icsap_pct", 0.0)))
+            self.kpi_los.set_value(float(k.get("dias_permanencia_total", 0.0))
+                                    / max(1, int(k.get("n_aihs_ou_apacs", 1)))
+                                    if k.get("n_aihs_ou_apacs", 0) > 0 else 0.0)
+            self.kpi_readm.set_value(float(k.get("readmissao_30d_est_pct", 0.0)))
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_kpis: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
+    _nome_por_cnes: dict[str, str] = {}
+
+    def _nomes_hospitais(self, m: DashboardMetrics) -> dict[str, str]:
+        """CNES → nome fantasia (do CNES) ou nome do benchmarking. Para rótulos de eixo."""
+        nomes: dict[str, str] = {}
+        try:
+            g = m.hospitais_geo
+            if g is not None and not g.is_empty() and "CO_CNES" in g.columns:
+                ncol = next((c for c in ("NO_FANTASIA", "NO_RAZAO_SOCIAL") if c in g.columns), None)
+                if ncol:
+                    for c, nm in zip(g["CO_CNES"].cast(pl.Utf8).to_list(), g[ncol].cast(pl.Utf8).to_list()):
+                        if c and nm:
+                            nomes[str(c).strip().zfill(7)] = str(nm).strip()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            b = m.benchmarking
+            if b is not None and not b.is_empty() and "hospital_nome" in b.columns:
+                for c, nm in zip(b["hospital_cnes"].cast(pl.Utf8).to_list(), b["hospital_nome"].cast(pl.Utf8).to_list()):
+                    if c and nm:
+                        nomes.setdefault(str(c).strip().zfill(7), str(nm).strip())
+        except Exception:  # noqa: BLE001
+            pass
+        self._nome_por_cnes = nomes
+        return nomes
+
+    def _rotulo_hosp(self, cnes: object, n: int = 30) -> str:
+        c = str(cnes or "").strip().zfill(7)
+        nm = self._nome_por_cnes.get(c)
+        return charts.short(nm, n) if nm else f"CNES {c}"
+
     def _fill_tab_risco(self, m: DashboardMetrics) -> None:
-        # Gráfico de estratos (médio de ALTO/MEDIO/BAIXO nos hospitais)
-        df = m.estratificacao_risco
-        if pg is not None and not df.is_empty():
-            self.plot_estratos.clear()
-            cat = ["ALTO", "MEDIO", "BAIXO"]
-            vals = []
-            for c in cat:
-                col = f"pct_{c}"
-                vals.append(float(df[col].mean()) if col in df.columns else 0.0)
-            
-            w = 0.5
-            b1 = pg.BarGraphItem(x=[0], height=[vals[0]], width=w, brush=_brush(_DANG))
-            b2 = pg.BarGraphItem(x=[1], height=[vals[1]], width=w, brush=_brush(_WARN))
-            b3 = pg.BarGraphItem(x=[2], height=[vals[2]], width=w, brush=_brush(_OK))
-            self.plot_estratos.addItem(b1)
-            self.plot_estratos.addItem(b2)
-            self.plot_estratos.addItem(b3)
-            
-            ax = self.plot_estratos.getAxis("bottom")
-            ax.setTicks([[(0, "Alto"), (1, "Médio"), (2, "Baixo")]])
-            self.plot_estratos.setXRange(-0.8, 2.8)
-            ymax = max(100.0, max(vals) * 1.1) if any(vals) else 100.0
-            self.plot_estratos.setYRange(0, ymax, padding=0)
-            self.plot_estratos.setLimits(yMin=0, yMax=ymax)
-            self.plot_estratos.setTitle(f"Estratos — ALTO={vals[0]:.1f}%, MÉDIO={vals[1]:.1f}%, BAIXO={vals[2]:.1f}%",
-                                        color=_TXT, size="10pt")
-        # CMI
-        if pg is not None and not m.eficiencia_clinica.is_empty() and "case_mix_index" in m.eficiencia_clinica.columns:
-            self.plot_cmi.clear()
-            s_cmi = m.eficiencia_clinica["case_mix_index"].fill_null(0.0).fill_nan(0.0)
-            cmi = s_cmi.to_numpy()
-            cnes = m.eficiencia_clinica["cnes"].to_list()
-            y = cmi
-            x = list(range(len(y)))
-            sp = pg.ScatterPlotItem(x=x, y=list(y), size=8,
-                                    pen=_pen(_PRI_DARK), brush=_brush(_PRI))
-            self.plot_cmi.addItem(sp)
-            if len(x):
-                self.plot_cmi.getAxis("bottom").setTicks([
-                    [(x[i], (c if len(c) <= 5 else c[-5:]))
-                     for i, c in enumerate(cnes) if i % max(1, len(x)//12) == 0]
-                ])
-                self.plot_cmi.setXRange(-0.5, len(x)-0.5, padding=0)
-                self.plot_cmi.setLimits(xMin=-0.5, xMax=len(x)-0.5, yMin=0)
-            # média CMI
-            avg = float(y.mean()) if len(y) else 0.0
-            ln = pg.InfiniteLine(pos=avg, angle=0, pen=_pen(_WARN, 2))
-            self.plot_cmi.addItem(ln)
-            self.plot_cmi.setTitle(f"Case Mix Index — média={avg:.2f}", color=_TXT, size="10pt")
-        # Tabela estratos
-        self._plfill(self.tbl_risco, df)
+        try:
+            self._nomes_hospitais(m)
+            df = m.estratificacao_risco
+            if pg is not None:
+                if df is None or df.is_empty():
+                    charts.empty_message(self.plot_estratos, "Sem dados de estratificação de risco")
+                else:
+                    d = df
+                    for c in ("pct_ALTO", "pct_MEDIO", "pct_BAIXO"):
+                        if c not in d.columns:
+                            d = d.with_columns(pl.lit(0.0).alias(c))
+                    d = d.with_columns([
+                        pl.col(c).cast(pl.Float64, strict=False).fill_null(0.0).fill_nan(0.0)
+                        for c in ("pct_ALTO", "pct_MEDIO", "pct_BAIXO")
+                    ])
+                    ma = float(d["pct_ALTO"].mean() or 0.0)
+                    mm = float(d["pct_MEDIO"].mean() or 0.0)
+                    mb = float(d["pct_BAIXO"].mean() or 0.0)
+                    d = d.sort(["pct_ALTO", "pct_MEDIO"], descending=[True, True]).head(30)
+                    cnes_col = next((c for c in ("_cnes", "cnes", "CNES") if c in d.columns), d.columns[0])
+                    labels = [self._rotulo_hosp(c) for c in d[cnes_col].to_list()]
+                    titulo = f"Estratos de risco por hospital (média: alto {ma:.0f}% · médio {mm:.0f}% · baixo {mb:.0f}%)"
+                    charts.stacked_bars_h(
+                        self.plot_estratos, labels,
+                        [("Alto", d["pct_ALTO"].to_list(), charts.DANG),
+                         ("Médio", d["pct_MEDIO"].to_list(), charts.WARN),
+                         ("Baixo", d["pct_BAIXO"].to_list(), charts.OK)],
+                        title=titulo,
+                    )
+            ef = m.eficiencia_clinica
+            if pg is not None:
+                if ef is None or ef.is_empty() or "case_mix_index" not in ef.columns:
+                    charts.empty_message(self.plot_cmi, "Case Mix Index indisponível")
+                else:
+                    cmi = ef["case_mix_index"].cast(pl.Float64, strict=False).fill_null(0.0).fill_nan(0.0).to_list()
+                    ccol = "cnes" if "cnes" in ef.columns else ef.columns[0]
+                    if not cmi or max(cmi) <= 0:
+                        # Sem pesos DRG o CMI é 0 para todos: mostra o volume por hospital no lugar
+                        ncol = "n_episodios" if "n_episodios" in ef.columns else None
+                        if ncol:
+                            vol = ef[ncol].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
+                            labs_v = [self._rotulo_hosp(c) for c in ef[ccol].to_list()]
+                            mxv = max(vol) if vol and max(vol) > 0 else 1.0
+                            charts.bar_categorical(
+                                self.plot_cmi, labs_v, vol,
+                                colors=[charts.lerp(charts.PRI_DARK, charts.PRI, v / mxv) for v in vol],
+                                title="Internações por hospital (CMI indisponível: pesos DRG não integrados)",
+                                value_fmt="{:,.0f}", sort_desc=True, horizontal=True,
+                                axis_label="nº de internações no período",
+                            )
+                        else:
+                            charts.empty_message(self.plot_cmi,
+                                                 "Case Mix Index indisponível: tabela de pesos DRG ainda não integrada")
+                        cmi = []
+                    labels = [self._rotulo_hosp(c) for c in ef[ccol].to_list()] if cmi else []
+                    avg = (sum(cmi) / len(cmi)) if cmi else 0.0
+                    mx = max(cmi) if cmi and max(cmi) > 0 else 1.0
+                    colors = [charts.lerp("#818CF8", "#A855F7", v / mx) for v in cmi]
+                    if cmi:
+                      charts.bar_categorical(
+                        self.plot_cmi, labels, cmi, colors=colors,
+                        title=f"Case Mix Index por hospital — média {avg:.2f}",
+                        value_fmt="{:.2f}", ref=avg, ref_label=f"média {avg:.2f}",
+                        sort_desc=True, horizontal=True,
+                        axis_label="CMI (1,0 = complexidade média do conjunto)",
+                      )
+            self._plfill(self.tbl_risco, df)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_risco: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     def _fill_tab_efic(self, m: DashboardMetrics) -> None:
-        df = m.eficiencia_clinica
-        if pg is not None and not df.is_empty() and "los_o_e" in df.columns:
-            self.plot_los.clear()
-            labels = df["cnes"].to_list()
-            oe = df["los_o_e"].fill_null(0.0).fill_nan(0.0).to_numpy().tolist()
-            x = list(range(len(oe)))
-            colors = [_color_for_pct(50 if v < 1 else 50 + (v-1)*50).name() for v in oe]
-            bg = pg.BarGraphItem(x=x, height=oe, width=0.35,
-                                 brushes=[QBrush(QColor(c)) for c in colors])
-            self.plot_los.addItem(bg)
-            self.plot_los.addItem(pg.InfiniteLine(pos=1.0, angle=0, pen=_pen(_WARN, 2)))
-            if x:
-                self.plot_los.getAxis("bottom").setTicks([
-                    [(x[i], (c if len(c) <= 5 else c[-5:]))
-                     for i, c in enumerate(labels) if i % max(1, len(x)//12) == 0]
-                ])
-                self.plot_los.setXRange(-0.5, len(x)-0.5, padding=0)
-        if pg is not None and not df.is_empty() and "custo_o_e" in df.columns:
-            self.plot_custo.clear()
-            labels = df["cnes"].to_list() if "cnes" in df.columns else []
-            ce = df["custo_o_e"].fill_null(0.0).fill_nan(0.0).to_numpy().tolist()
-            colors_c = [_color_for_pct(50 if v < 1 else 50 + (v-1)*50).name() for v in ce]
-            x = list(range(len(ce)))
-            bg = pg.BarGraphItem(x=x, height=ce, width=0.35,
-                                 brushes=[QBrush(QColor(c)) for c in colors_c])
-            self.plot_custo.addItem(bg)
-            self.plot_custo.addItem(pg.InfiniteLine(pos=1.0, angle=0, pen=_pen(_WARN, 2)))
-            if x and labels:
-                self.plot_custo.getAxis("bottom").setTicks([
-                    [(x[i], (c if len(c) <= 5 else c[-5:]))
-                     for i, c in enumerate(labels) if i % max(1, len(x)//12) == 0]
-                ])
-                self.plot_custo.setXRange(-0.5, len(x)-0.5, padding=0)
-        self._plfill(self.tbl_efic, df)
+        try:
+            self._nomes_hospitais(m)
+            df = m.eficiencia_clinica
+            ccol = "cnes" if (df is not None and "cnes" in df.columns) else None
+            for plot, col, titulo, eixo in (
+                (self.plot_los, "los_o_e", "Permanência observada / esperada (O/E) por hospital",
+                 "O/E · esperado = benchmark da linha de cuidado ou média do conjunto (>1 = permanece mais)"),
+                (self.plot_custo, "custo_o_e", "Custo médio / esperado (O/E) por hospital",
+                 "O/E · esperado = benchmark da linha de cuidado ou média do conjunto (>1 = custa mais)"),
+            ):
+                if pg is None:
+                    continue
+                if df is None or df.is_empty() or col not in df.columns or ccol is None:
+                    charts.empty_message(plot, f"{titulo}: indisponível")
+                    continue
+                vals = df[col].cast(pl.Float64, strict=False).fill_null(0.0).fill_nan(0.0).to_list()
+                labels = [self._rotulo_hosp(c) for c in df[ccol].to_list()]
+                n_out = sum(1 for v in vals if v > 5.0)
+                if n_out:
+                    eixo += f"  ·  eixo cortado em 5× ({n_out} hospitais acima, valor real no rótulo ›)"
+                charts.bar_categorical(
+                    plot, labels, vals, colors=[charts.color_for_ratio(v) for v in vals],
+                    title=titulo, value_fmt="{:.2f}", ref=1.0, ref_label="benchmark 1,0",
+                    sort_desc=True, horizontal=True, axis_label=eixo, clip_at=5.0,
+                )
+            self._plfill(self.tbl_efic, df)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_efic: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     def _fill_tab_terr(self, m: DashboardMetrics) -> None:
-        # ICSAP por condição
-        if pg is not None and not m.icsap_por_condicao.is_empty():
-            self.plot_icsap.clear()
-            conds = m.icsap_por_condicao["condicao_evitavel"].to_list()
-            ns = m.icsap_por_condicao["n_internacoes"].to_numpy().tolist()
-            y = list(reversed(ns)); labels = list(reversed(conds))
-            brushes = [QBrush(_color_for_pct(50 - 50*(y[i]/(max(y) if max(y) else 1)))) for i in range(len(y))]
-            bg = pg.BarGraphItem(x=list(range(len(y))), height=y, width=0.4, brushes=brushes)
-            self.plot_icsap.addItem(bg)
-            self.plot_icsap.getAxis("bottom").setTicks([
-                [(i, c if len(c) < 26 else c[:24] + "…") for i, c in enumerate(labels)]
-            ])
-            ax = self.plot_icsap.getAxis("bottom")
-            ax.setStyle(tickTextHeight=110, autoExpandTextSpace=True)
-            self.plot_icsap.setXRange(-0.5, len(y)-0.5, padding=0)
-        # Tabelas
-        self._plfill(self.tbl_terr, m.integracao_territorial)
-        if m.huff and not m.huff.hospital_attraction.is_empty():
-            self._plfill(self.tbl_huff, m.huff.hospital_attraction)
-
-        # =====================================================
-        # Mapa concêntrico + filtros de agrupamento SIGTAP
-        # =====================================================
         try:
-            from papahr.dashboard.cnes_loader import get_cnes_data
-            cnes_data = get_cnes_data().load()
-            muni_df = cnes_data.municipios
-            estab_df = cnes_data.estabelecimentos
-            self._muni_df = muni_df
-        except Exception as exc:
-            log.warning("Não foi possível carregar CNES para o mapa: %s", exc)
-            muni_df = pl.DataFrame()
-            estab_df = pl.DataFrame()
-
-        points: list[HospitalMapPoint] = []
-        target_cnes = set(self._last_cnes or [])
-        if estab_df is not None and not estab_df.is_empty() and "CO_CNES" in estab_df.columns:
-            cols = [
-                "CO_CNES", "NO_FANTASIA", "NO_RAZAO_SOCIAL",
-                "NU_LATITUDE", "NU_LONGITUDE", "NU_LEITOS_SUS",
-            ]
-            avail = [c for c in cols if c in estab_df.columns]
-            if len(avail) >= 5:
-                filt = estab_df.select(avail)
-                if target_cnes:
-                    filt = filt.filter(pl.col("CO_CNES").cast(pl.Utf8).is_in(list(target_cnes)))
-                for row in filt.to_dicts():
-                    cnes = str(row.get("CO_CNES", ""))
-                    nome = str(
-                        row.get("NO_FANTASIA") or row.get("NO_RAZAO_SOCIAL") or cnes
+            self._nomes_hospitais(m)
+            # ICSAP por condição (barras horizontais, maiores primeiro)
+            if pg is not None:
+                ic = m.icsap_por_condicao
+                if ic is None or ic.is_empty() or "condicao_evitavel" not in ic.columns:
+                    charts.empty_message(self.plot_icsap, "Sem internações por condição sensível (ICSAP)")
+                else:
+                    conds = ic["condicao_evitavel"].cast(pl.Utf8).to_list()
+                    ns = ic["n_internacoes"].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
+                    mx = max(ns) if ns and max(ns) > 0 else 1.0
+                    cores = [charts.color_for_pct(60.0 * v / mx) for v in ns]
+                    total = sum(ns)
+                    charts.bar_categorical(
+                        self.plot_icsap, conds, ns, colors=cores,
+                        title=f"ICSAP por condição (total {int(total):,})".replace(",", "."),
+                        value_fmt="{:,.0f}", sort_desc=True, horizontal=True, max_items=15,
+                        axis_label="nº de internações",
                     )
-                    try:
-                        lat = float(row.get("NU_LATITUDE") or 0.0)
-                        lon = float(row.get("NU_LONGITUDE") or 0.0)
-                    except (TypeError, ValueError):
-                        continue
-                    if not lat or not lon:
-                        continue
-                    try:
-                        leitos = float(row.get("NU_LEITOS_SUS") or 50.0)
-                    except (TypeError, ValueError):
-                        leitos = 50.0
-                    points.append(HospitalMapPoint(
-                        cnes=cnes, nome=nome, latitude=lat, longitude=lon, leitos=leitos,
-                    ))
+            # Tabelas
+            self._plfill(self.tbl_terr, m.integracao_territorial)
+            if m.huff and not m.huff.hospital_attraction.is_empty():
+                self._plfill(self.tbl_huff, m.huff.hospital_attraction)
+            else:
+                self._plfill(self.tbl_huff, pl.DataFrame())
 
-        # Ajusta o max_rate baseado nos dados
-        if points and self._last_df is not None and not self._last_df.is_empty():
-            # Estimativa rápida de faixa
+            # =====================================================
+            # Mapa concêntrico: SOMENTE os hospitais presentes no dataset
+            # (antes, sem seleção, entravam os 598 mil estabelecimentos do CNES
+            #  e o mapa nunca terminava de desenhar)
+            # =====================================================
             try:
-                total_int = self._last_df.height
-                if muni_df is not None and "NU_POPULACAO" in muni_df.columns and not muni_df.is_empty():
-                    pop_total = float(muni_df["NU_POPULACAO"].cast(pl.Float64, strict=False).fill_null(0).sum() or 1)
-                    taxa_geral = 1000.0 * total_int / pop_total
-                    self.concentric_map.set_max_rate(max(10.0, taxa_geral * 2.5))
-            except Exception:
-                pass
-        try:
-            self.concentric_map.set_data(
-                points,
-                muni_df if (muni_df is not None and not muni_df.is_empty()) else pl.DataFrame(),
-                self._last_df if self._last_df is not None else pl.DataFrame(),
-            )
-        except Exception as _exc_map:
-            log.warning("Falha ao renderizar mapa concêntrico: %s", _exc_map)
+                from papahr.dashboard.cnes_loader import get_cnes_data
+                cnes_data = get_cnes_data().load()
+                muni_df = cnes_data.municipios
+                self._muni_df = muni_df
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Não foi possível carregar CNES para o mapa: %s", exc)
+                muni_df = pl.DataFrame()
 
-        # Popula combos de filtro
-        self._rebuild_map_group_options()
+            points: list[HospitalMapPoint] = []
+            geo = m.hospitais_geo
+            alvo = {str(c).strip().zfill(7) for c in (self._last_cnes or []) if str(c).strip()}
+            volume: dict[str, float] = {}
+            try:
+                dfp = self._current_active_df()
+                if dfp is not None and not dfp.is_empty() and "CNES" in dfp.columns:
+                    g = dfp.group_by("CNES").len()
+                    volume = {str(k).strip().zfill(7): float(v)
+                              for k, v in zip(g["CNES"].to_list(), g["len"].to_list()) if k is not None}
+            except Exception:  # noqa: BLE001
+                volume = {}
+            if geo is not None and not geo.is_empty() and {"CO_CNES", "NU_LATITUDE", "NU_LONGITUDE"} <= set(geo.columns):
+                ncol = next((c for c in ("NO_FANTASIA", "NO_RAZAO_SOCIAL") if c in geo.columns), None)
+                for row in geo.to_dicts():
+                    cnes = str(row.get("CO_CNES") or "").strip().zfill(7)
+                    if alvo and cnes not in alvo:
+                        continue
+                    try:
+                        lat = float(row.get("NU_LATITUDE")); lon = float(row.get("NU_LONGITUDE"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not (math.isfinite(lat) and math.isfinite(lon)) or lat == 0.0 or lon == 0.0:
+                        continue
+                    nome = str(row.get(ncol) or cnes) if ncol else cnes
+                    points.append(HospitalMapPoint(cnes=cnes, nome=nome, latitude=lat, longitude=lon,
+                                                   leitos=volume.get(cnes, 50.0)))
+            points.sort(key=lambda p: -p.leitos)
+            points = points[:40]
+            try:
+                self.concentric_map.set_data(
+                    points,
+                    muni_df if (muni_df is not None and not muni_df.is_empty()) else pl.DataFrame(),
+                    self._current_active_df() if self._current_active_df() is not None else pl.DataFrame(),
+                )
+                self.lbl_map_hover.set_status(
+                    f"{len(points)} hospital(is) no mapa — clique num pino para selecionar", "info")
+            except Exception as _exc_map:  # noqa: BLE001
+                log.warning("Falha ao renderizar mapa concêntrico: %s", _exc_map)
+                self.lbl_map_hover.set_status("Mapa indisponível (ver log)", "warn")
 
-        # =====================================================
-        # Curvas de decaimento exponencial: popula combo hospital
-        # =====================================================
-        decay_df = m.distance_decay
-        bench_df = m.benchmarking
-        self.cbo_decay_hospital.blockSignals(True)
-        self.cbo_decay_hospital.clear()
-        if decay_df is not None and not decay_df.is_empty():
-            # nome do hospital: se bench_df tem hospital_nome usa senão usa CNES
-            nome_lookup: dict[str, str] = {}
-            if bench_df is not None and not bench_df.is_empty() and "hospital_nome" in bench_df.columns:
-                for r in bench_df.select(["hospital_cnes", "hospital_nome"]).unique(
-                        subset=["hospital_cnes"], keep="first").iter_rows(named=True):
-                    nome_lookup[str(r["hospital_cnes"])] = str(r["hospital_nome"] or "")
-            # CNES únicos presentes em decay_df (ordem original)
-            cnes_unicos: list[str] = []
-            vistos: set[str] = set()
-            for c in decay_df["hospital_cnes"].cast(pl.Utf8).to_list():
-                if c in vistos:
-                    continue
-                vistos.add(c); cnes_unicos.append(c)
-            for cnes in cnes_unicos:
-                nome = nome_lookup.get(cnes, "").strip()
-                label = f"{cnes} — {nome}" if nome else f"CNES {cnes}"
-                self.cbo_decay_hospital.addItem(label, cnes)
-        self.cbo_decay_hospital.blockSignals(False)
-        # Dispara render inicial do primeiro hospital (se tiver)
-        if self.cbo_decay_hospital.count() > 0:
-            self.cbo_decay_hospital.setCurrentIndex(0)
-        else:
-            self._on_decay_hospital_changed(0)
+            # Popula combos de filtro
+            self._rebuild_map_group_options()
+
+            # =====================================================
+            # Curvas de decaimento exponencial: popula combo hospital
+            # =====================================================
+            decay_df = m.distance_decay
+            self.cbo_decay_hospital.blockSignals(True)
+            self.cbo_decay_hospital.clear()
+            if decay_df is not None and not decay_df.is_empty():
+                vistos: set[str] = set()
+                for c in decay_df["hospital_cnes"].cast(pl.Utf8).to_list():
+                    if c in vistos:
+                        continue
+                    vistos.add(c)
+                    self.cbo_decay_hospital.addItem(f"{self._rotulo_hosp(c, 48)}  ({c})", c)
+            self.cbo_decay_hospital.blockSignals(False)
+            if self.cbo_decay_hospital.count() > 0:
+                self.cbo_decay_hospital.setCurrentIndex(0)
+                self._on_decay_hospital_changed(0)
+            else:
+                self._on_decay_hospital_changed(0)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_terr: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     def _fill_tab_trans(self, m: DashboardMetrics) -> None:
-        df = m.transicao_cuidado
-        if pg is not None and not df.is_empty():
-            self.plot_trans.clear()
-            linhas = df["linha_cuidado"].to_list()
-            x = list(range(len(linhas)))
-            contato = df["contato_48h_pct"].to_numpy().tolist() if "contato_48h_pct" in df.columns else [0]*len(linhas)
-            readm = df["readmissao_30d_pct_est"].to_numpy().tolist() if "readmissao_30d_pct_est" in df.columns else [0]*len(linhas)
-            # Dois grupos de barras (offset esquerda/direita)
-            w = 0.38
-            bg1 = pg.BarGraphItem(x=[i-w for i in x], height=contato, width=w,
-                                  brush=_brush(_OK))
-            bg2 = pg.BarGraphItem(x=[i+w for i in x], height=readm, width=w,
-                                  brush=_brush(_DANG))
-            self.plot_trans.addItem(bg1); self.plot_trans.addItem(bg2)
-            ax = self.plot_trans.getAxis("bottom")
-            ax.setTicks([
-                [(i, (c if len(c) < 24 else c[:22] + "…")) for i, c in enumerate(linhas)]
-            ])
-            ax.setStyle(tickTextHeight=110, autoExpandTextSpace=True)
-            self.plot_trans.setXRange(-1, len(x), padding=0)
-            self.plot_trans.setYRange(0, 100)
-            legend = self.plot_trans.addLegend(offset=(20, 20), brush=None, labelTextColor=_TXT)
-            # O addLegend só adiciona itens quando há gráficos plotados com nome; workaround:
-            # usamos duas linhas pontilhadas "dummy"
-            self.plot_trans.plot([], [], pen=_pen(_OK, 6), name="Contato 48h")
-            self.plot_trans.plot([], [], pen=_pen(_DANG, 6), name="Readmissão 30d")
-            legend = self.plot_trans.getPlotItem().legend
-        self._plfill(self.tbl_trans, df)
+        try:
+            df = m.transicao_cuidado
+            if pg is not None:
+                if df is None or df.is_empty() or "linha_cuidado" not in df.columns:
+                    charts.empty_message(self.plot_trans, "Sem dados de transição de cuidado "
+                                                          "(requer datas de internação e saída)")
+                else:
+                    linhas = df["linha_cuidado"].cast(pl.Utf8).to_list()
+                    contato = (df["contato_48h_pct"].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
+                               if "contato_48h_pct" in df.columns else [0.0] * len(linhas))
+                    readm = (df["readmissao_30d_pct_est"].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
+                             if "readmissao_30d_pct_est" in df.columns else [0.0] * len(linhas))
+                    if max(contato + readm + [0.0]) > 0:
+                        charts.grouped_bars(
+                            self.plot_trans, linhas,
+                            [("Contato em 48h após alta (%)", contato, charts.OK),
+                             ("Readmissão em 30 dias (%)", readm, charts.DANG)],
+                            title="Transição de cuidado por linha de cuidado",
+                            value_fmt="{:.1f}", unit="%", axis_label="% dos episódios",
+                        )
+                    else:
+                        # SIH-RD não identifica o paciente: readmissão/contato pós-alta não são
+                        # mensuráveis. Mostra o que é real: o volume de altas por linha de cuidado.
+                        altas = (df["n_altas"].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
+                                 if "n_altas" in df.columns else [0.0] * len(linhas))
+                        bench = (df["benchmark_readmissao_pct"].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
+                                 if "benchmark_readmissao_pct" in df.columns else [0.0] * len(linhas))
+                        mx = max(altas) if altas and max(altas) > 0 else 1.0
+                        charts.bar_categorical(
+                            self.plot_trans, linhas, altas,
+                            colors=[charts.lerp(charts.PRI_DARK, charts.PRI, v / mx) for v in altas],
+                            title="Altas por linha de cuidado",
+                            value_fmt="{:,.0f}", sort_desc=True, horizontal=True,
+                            axis_label=("nº de altas  ·  readmissão 30d e contato 48h não mensuráveis "
+                                        "neste dataset (SIH-RD não identifica o paciente)"),
+                        )
+            self._plfill(self.tbl_trans, df)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_trans: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     def _fill_tab_geral(self, m: DashboardMetrics) -> None:
-        ts = m.serie_temporal
-        if pg is not None and not ts.is_empty() and ts.width >= 3:
-            self.plot_ts.clear()
-            cols = ts.columns
-            label_x = f"{cols[0]}-{cols[1]}" if len(cols) >= 2 else ""
-            n = ts["n_internacoes"].to_numpy().tolist()
-            x = list(range(len(n)))
-            # Labels bottom (col1-col2 concat)
-            try:
-                k1, k2 = cols[0], cols[1]
-                labels = [f"{int(a)}-{int(b):02d}" for a, b in zip(ts[k1].to_list(), ts[k2].to_list())]
-            except (TypeError, ValueError):
-                labels = [str(i) for i in x]
-            bg = pg.BarGraphItem(x=x, height=n, width=0.4, brush=_brush(_PRI))
-            self.plot_ts.addItem(bg)
-            if "taxa_icsap_pct" in ts.columns:
-                y2 = ts["taxa_icsap_pct"].to_numpy().tolist()
-                if y2 and max(y2) > 0:
-                    # escala 0-100 em eixo 2
-                    # (simples: escalona y2 para intervalo do mesmo gráfico usando eixo 2)
+        try:
+            ts = m.serie_temporal
+            if pg is not None:
+                if ts is None or ts.is_empty() or "n_internacoes" not in ts.columns:
+                    charts.empty_message(self.plot_ts, "Sem série temporal (requer competência ano/mês)")
+                else:
+                    cols = ts.columns
+                    n = ts["n_internacoes"].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
                     try:
-                        self.plot_ts.showAxis("right")
-                        self.plot_ts.getAxis("right").setPen(_pen(_WARN))
-                        self.plot_ts.getAxis("right").setTextPen(_WARN)
-                        self.plot_ts.setYRange(0, max(100.0, float(max(n) or 0) * 1.1), padding=0.0)
-                        # Segundo plotitem com viewbox secundário? Simples aqui: usar escala normalizada
-                        # Simplificação: plotar normalizado em % do max de n
-                        mx = max(n) if n else 1
-                        y2_sc = [(y / 100.0) * mx for y in y2]
-                        self.plot_ts.plot(x, y2_sc, pen=_pen(_WARN, 2), name="Taxa ICSAP (%)")
-                    except Exception:
-                        pass
-            if x and labels:
-                self.plot_ts.getAxis("bottom").setTicks([
-                    [(x[i], c) for i, c in enumerate(labels) if i % max(1, len(x)//10) == 0]
-                ])
-                self.plot_ts.setXRange(-0.5, len(x)-0.5, padding=0)
-        # Alertas
-        if m.alerts:
-            df_alerts = pl.DataFrame({"#": list(range(1, len(m.alerts)+1)),
-                                       "Alerta Operacional": m.alerts})
-        else:
-            df_alerts = pl.DataFrame({"#": ["1"], "Alerta Operacional": ["Nenhum alerta. Todos os indicadores dentro dos limites recomendados."]})
-        self._plfill(self.tbl_alerts, df_alerts)
-        # Top 10
-        self._plfill(self.tbl_top10_p, m.top10_procedimentos)
-        self._plfill(self.tbl_top10_e, m.top10_especialidades)
+                        k1, k2 = cols[0], cols[1]
+                        labels = [f"{int(a)}-{int(b):02d}" for a, b in zip(ts[k1].to_list(), ts[k2].to_list())]
+                    except (TypeError, ValueError, IndexError):
+                        labels = [str(i + 1) for i in range(len(n))]
+                    taxa = (ts["taxa_icsap_pct"].cast(pl.Float64, strict=False).fill_null(0.0).to_list()
+                            if "taxa_icsap_pct" in ts.columns else None)
+                    periodo = f"{labels[0]} a {labels[-1]}" if len(labels) > 1 else (labels[0] if labels else "")
+                    charts.bars_with_line(
+                        self.plot_ts, labels, n, taxa,
+                        title=f"Internações por competência e taxa ICSAP — {periodo}",
+                        bar_name="Internações", line_name="Taxa ICSAP (%)", line_max=None,
+                    )
+            # Alertas
+            if m.alerts:
+                df_alerts = pl.DataFrame({"#": list(range(1, len(m.alerts) + 1)),
+                                          "Alerta Operacional": m.alerts})
+            else:
+                df_alerts = pl.DataFrame({"#": ["1"], "Alerta Operacional":
+                                          ["Nenhum alerta. Todos os indicadores dentro dos limites recomendados."]})
+            self._plfill(self.tbl_alerts, df_alerts)
+            self._plfill(self.tbl_top10_p, m.top10_procedimentos)
+            self._plfill(self.tbl_top10_e, m.top10_especialidades)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_geral: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     # Slots mapa concêntrico e filtros de agrupamento SIGTAP
@@ -1306,30 +1470,46 @@ class DashboardPage(QWidget):
         self.cbo_map_filter.blockSignals(False)
 
     def _on_map_group_changed(self, _idx: int) -> None:
-        self._refresh_filter_combo()
-        mode = self.cbo_map_group.currentData() or "grupo"
-        self.concentric_map.set_group_mode(mode, None)
+        try:
+            self._refresh_filter_combo()
+            mode = self.cbo_map_group.currentData() or "grupo"
+            self.concentric_map.set_group_mode(mode, None)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_map_group_changed: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     def _on_map_filter_changed(self, _idx: int) -> None:
-        mode = self.cbo_map_group.currentData() or "grupo"
         try:
-            val = self.cbo_map_filter.currentData()
-        except Exception:
-            val = None
-        self.concentric_map.set_group_mode(mode, val)
+            mode = self.cbo_map_group.currentData() or "grupo"
+            try:
+                val = self.cbo_map_filter.currentData()
+            except Exception:
+                val = None
+            self.concentric_map.set_group_mode(mode, val)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_map_filter_changed: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     def _on_map_hospital_clicked(self, cnes: str) -> None:
-        self.hospital_selected.emit(cnes)
-        self.lbl_map_hover.set_status(f"🏥 Hospital selecionado — CNES {cnes}", "ok")
-        # Seleciona aba Risco e destaca o hospital (se possível)
-        self.tabs.setCurrentIndex(0)
+        try:
+            self.hospital_selected.emit(cnes)
+            self.lbl_map_hover.set_status(f"🏥 Hospital selecionado — CNES {cnes}", "ok")
+            # Seleciona aba Risco e destaca o hospital (se possível)
+            self.tabs.setCurrentIndex(0)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_map_hospital_clicked: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     def _on_map_radii_changed(self, _idx: int) -> None:
-        radii = self.cbo_map_radii.currentData()
-        if radii is not None:
-            self.concentric_map.set_radii(radii)
-            if self._metrics is not None:
-                self._fill_tab_terr(self._metrics)
+        try:
+            radii = self.cbo_map_radii.currentData()
+            if radii is not None:
+                self.concentric_map.set_radii(radii)
+                if self._metrics is not None:
+                    self._fill_tab_terr(self._metrics)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_map_radii_changed: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     def _plfill(self, table: QTableWidget, df: pl.DataFrame) -> None:
@@ -1338,12 +1518,25 @@ class DashboardPage(QWidget):
             table.setRowCount(0); table.setColumnCount(1)
             table.setHorizontalHeaderLabels(["Sem dados"])
             return
-        cols = [str(c) for c in df.columns]
+        view = df.head(500)
+        cols = [str(c) for c in view.columns]
+        # Nome do hospital ao lado da coluna de CNES (quando a tabela não traz nome)
+        cnes_like = next((c for c in cols if c.lower() in ("_cnes", "cnes", "hospital_cnes", "co_cnes")), None)
+        tem_nome = any(c.lower() in ("hospital", "hospital_nome", "nm_hospital", "no_fantasia") for c in cols)
+        if cnes_like and self._nome_por_cnes and not tem_nome:
+            try:
+                view = view.with_columns(
+                    pl.col(cnes_like).cast(pl.Utf8, strict=False).str.strip_chars().str.zfill(7)
+                    .replace_strict(self._nome_por_cnes, default="").alias("Hospital")
+                )
+                cols.insert(cols.index(cnes_like) + 1, "Hospital")
+                view = view.select(cols)
+            except Exception:  # noqa: BLE001
+                cols = [str(c) for c in view.columns]
         table.setColumnCount(len(cols))
         table.setHorizontalHeaderLabels(cols)
-        rows = min(df.height, 500)
+        rows = min(view.height, 500)
         table.setRowCount(rows)
-        view = df.head(500)
         for r in range(rows):
             for c, col in enumerate(cols):
                 v = view[col][r]
@@ -1351,15 +1544,20 @@ class DashboardPage(QWidget):
                     s = ""
                 elif isinstance(v, float):
                     if math.isfinite(v):
-                        s = (f"{v:,.2f}" if abs(v) >= 1000 else f"{v:.4f}" if abs(v) < 1
+                        is_pct = ("pct" in col.lower() or "%" in col)
+                        s = (f"{v:,.2f}" if (abs(v) >= 1000 or is_pct) else f"{v:.4f}" if abs(v) < 1
                              else f"{v:.2f}").replace(",", "_").replace(".", ",").replace("_", ".")
                     else:
                         s = ""
                 else:
                     s = str(v)
                 item = QTableWidgetItem(s)
-                # colorir colunas percentuais
-                if ("pct" in col.lower() or "%" in col) and isinstance(v, (int, float)):
+                if isinstance(v, (int, float)):
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                # semáforo só em colunas onde "alto = ruim" (ICSAP, readmissão, risco alto, glosa, custo alto)
+                cl = col.lower()
+                ruim_alto = any(k in cl for k in ("icsap", "readm", "pct_alto", "glos", "custo_alto", "o_e", "oe"))
+                if ruim_alto and ("pct" in cl or "%" in col) and isinstance(v, (int, float)):
                     item.setForeground(QBrush(QColor(_TXT)))
                     try:
                         cor = _color_for_pct(float(v))
@@ -1370,6 +1568,124 @@ class DashboardPage(QWidget):
                 table.setItem(r, c, item)
         table.resizeColumnsToContents()
         table.horizontalHeader().setStretchLastSection(True)
+
+    def _on_load_files(self) -> None:
+        """Importa arquivos locais (CSV/Parquet/DBF/DBC) direto no dashboard, sem pipeline.
+
+        - CSV: detecta separador/codificação de CSV BR (DATASUS).
+        - DBF/DBC: lidos via read_dbc (roteia por extensão: .dbf puro ou .dbc comprimido).
+        Depois infere o sistema SUS pelas colunas e chama set_dataset() para
+        popular KPIs + cálculo.
+        """
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Selecionar arquivos (CSV, Parquet, DBF ou DBC)",
+            str(Path.home()),
+            "Dados (*.csv *.parquet *.pq *.dbf *.dbc *.DBC *.DBF);;Todos (*)",
+        )
+        if not files:
+            return
+        self.lbl_status.set_status(f"⏳ Carregando {len(files)} arquivo(s)...", "info")
+        QApplication.processEvents()
+        try:
+            dfs = []
+            for f in files:
+                p = Path(f)
+                ext = p.suffix.lower()
+                if ext in (".parquet", ".pq"):
+                    df = pl.read_parquet(p)
+                elif ext in (".dbf", ".dbc"):
+                    # read_dbc roteia por extensão: .dbf → DBF puro; .dbc → descompacta.
+                    from papahr.core.dbc_reader import read_dbc
+                    df = read_dbc(p)
+                elif ext == ".csv":
+                    # CSV BR (DATASUS/GSPHosp) usa (; sep) + windows-1252/utf8-bom.
+                    from papahr.dashboard.cnes_loader import _detect_csv_params
+                    auto_params = dict(_detect_csv_params(p))
+                    auto_params.update(
+                        try_parse_dates=True,
+                        infer_schema_length=5000,
+                        infer_schema=True,
+                    )
+                    try:
+                        df = pl.read_csv(p, **auto_params)
+                    except Exception as _e_csv1:
+                        # Fallback: detecta separador por contagem bruta em 64KB.
+                        try:
+                            raw = p.read_bytes()[:65536]
+                            c_semi = raw.count(b";")
+                            c_comma = raw.count(b",")
+                            sep = ";" if c_semi >= c_comma else ","
+                        except Exception:
+                            sep = ","
+                        try:
+                            df = pl.read_csv(
+                                p,
+                                separator=sep,
+                                encoding="utf8-lossy",
+                                quote_char='"',
+                                infer_schema=True,
+                                low_memory=True,
+                                ignore_errors=True,
+                                truncate_ragged_lines=True,
+                                try_parse_dates=True,
+                                infer_schema_length=5000,
+                            )
+                        except Exception:
+                            raise RuntimeError(
+                                f"CSV {p.name}: falhou autodetect e fallback. "
+                                f"Erro1: {type(_e_csv1).__name__}: {_e_csv1}"
+                            )
+                else:
+                    continue
+                if not df.is_empty():
+                    dfs.append(df)
+            if not dfs:
+                raise ValueError("Nenhum dado válido foi carregado dos arquivos.")
+            df_final = dfs[0] if len(dfs) == 1 else pl.concat(dfs, how="diagonal_relaxed")
+
+            # Auto-detecta o sistema SUS por heurística de colunas.
+            cols_norm: set[str] = {c.strip().lower() for c in getattr(df_final, "columns", [])}
+
+            def _has(*candidates: str) -> bool:
+                return any(c.strip().lower() in cols_norm for c in candidates)
+
+            if _has("n_aih", "aih", "cod_aih", "no_aih", "co_aih", "valor_aprovado", "val_tot", "diag_princ"):
+                auto_system = "SIH_RD"
+            elif _has("pa_proc_id", "pa_valapr", "pa_qtdapr", "pa_ufmun", "pa_munpcnt",
+                      "pa", "co_pa", "apac", "no_pa", "valor_apresentado", "vl_hospitalar",
+                      "cod_procedimento", "co_procedimento"):
+                auto_system = "SIA_PA"
+            elif _has("cnes_exec", "cnes", "no_fantasia", "co_cnes") and _has("sp_proc", "sp_valor", "co_ato", "sp_cnes"):
+                auto_system = "SIH_SP"
+            elif _has("cnes_exec", "cnes_prestador") and _has("rejeicao", "mot_rejeit", "co_mot_rejeicao", "cod_rejeicao"):
+                auto_system = "SIH_RJ"
+            else:
+                auto_system = self._last_system or "SIH_RD"
+
+            self._fonte_atual = "session"
+            idx = self.cbo_fonte_dados.findData("session")
+            if idx >= 0:
+                self.cbo_fonte_dados.blockSignals(True)
+                self.cbo_fonte_dados.setCurrentIndex(idx)
+                self.cbo_fonte_dados.blockSignals(False)
+            self.set_dataset(df_final, system=auto_system, cnes=None, compute_huff=None)
+            resumo = f"{len(files)} arquivo(s) · {df_final.height:,} linhas × {df_final.width} colunas · {auto_system}"
+            try:
+                self.lbl_fonte_info.setText(f"✅ {resumo}")
+            except Exception:
+                pass
+            self.lbl_status.set_status(f"✅ {resumo} — pronto para calcular", "ok")
+            QApplication.processEvents()
+        except Exception as exc:
+            print(f"[!!!] EXCECAO _on_load_files: {type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc()
+            log.exception("Erro ao importar arquivos no dashboard")
+            self.lbl_status.set_status(f"Erro ao importar: {type(exc).__name__}", "error")
+            QMessageBox.warning(
+                self, "Falha ao importar arquivos",
+                f"Não foi possível carregar os arquivos:\n\n{type(exc).__name__}: {str(exc)[:300]}",
+            )
 
     # ------------------------------------------------------------------
     def _on_export(self) -> None:
@@ -1415,203 +1731,207 @@ class DashboardPage(QWidget):
     # ------------------------------------------------------------------
     def _fill_tab_glosas(self, m: DashboardMetrics) -> None:
         """Popula KPIs, 2 gráficos e 2 tabelas de glosas."""
-        causas_df = m.glosas_causas
-        serie_df = m.glosas_serie_temporal
-        kpi_total = m.kpis.get("n_aihs_ou_apacs", 0.0) or 0.0
+        try:
+            causas_df = m.glosas_causas
+            serie_df = m.glosas_serie_temporal
+            kpi_total = m.kpis.get("n_aihs_ou_apacs", 0.0) or 0.0
 
-        # ---- KPIs rápidos (4 cards) ----
-        if causas_df.is_empty() and serie_df.is_empty():
-            self.kpi_glosas_n.set_value(0)
-            self.kpi_glosas_pct.set_value(0.0)
-            self.kpi_glosas_val.set_value(0.0)
-            self.kpi_glosas_top.set_value("Sem dados de glosa no dataset")
-            if pg is not None:
-                self.plot_glosas_causas.clear(); self.plot_glosas_serie.clear()
-            self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Informação": [
-                "Nenhuma coluna de glosa foi detectada no dataset carregado.",
-                "Colunas procuradas: VL_GLOSA_PARCIAL, VL_GLOSA_TOTAL, QT_GLOSA_*, CO_GLOSA1..5,",
-                "  MOTIVO_GLOSA, COMPETÊNCIA, ANO/MÊS, DATAS de internação/alta.",
-                "Solução: use arquivos SIH-RD, SIH-RJ ou SIA-PA do DATASUS que contenham essas colunas de auditoria/glosa."
-            ]}))
-            self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Informação": [
-                "Série histórica indisponível — faltam colunas de competência/ano/mês ou de glosa."
-            ]}))
-            return
+            # ---- KPIs rápidos (4 cards) ----
+            if causas_df.is_empty() and serie_df.is_empty():
+                self.kpi_glosas_n.set_value(0)
+                self.kpi_glosas_pct.set_value(0.0)
+                self.kpi_glosas_val.set_value(0.0)
+                self.kpi_glosas_top.set_value("Sem dados de glosa no dataset")
+                if pg is not None:
+                    self.plot_glosas_causas.clear(); self.plot_glosas_serie.clear()
+                self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Informação": [
+                    "Nenhuma coluna de glosa foi detectada no dataset carregado.",
+                    "Colunas procuradas: VL_GLOSA_PARCIAL, VL_GLOSA_TOTAL, QT_GLOSA_*, CO_GLOSA1..5,",
+                    "  MOTIVO_GLOSA, COMPETÊNCIA, ANO/MÊS, DATAS de internação/alta.",
+                    "Solução: use arquivos SIH-RD, SIH-RJ ou SIA-PA do DATASUS que contenham essas colunas de auditoria/glosa."
+                ]}))
+                self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Informação": [
+                    "Série histórica indisponível — faltam colunas de competência/ano/mês ou de glosa."
+                ]}))
+                return
 
-        # --- Agregados globais para KPI ---
-        n_glosas: int = 0
-        pct_glosas: float = 0.0
-        valor_glosado: float = 0.0
-        top_causa: str = "—"
-        if not serie_df.is_empty():
-            col_n_tot = "N total AIHs/APACs"
-            col_n_gl = "N glosadas"
-            col_vl_gl = "Valor glosado (R$)"
-            if col_n_tot in serie_df.columns and col_n_gl in serie_df.columns:
-                n_total = int(serie_df[col_n_tot].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
-                n_glosas = int(serie_df[col_n_gl].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
-                if kpi_total > 0:
-                    pct_glosas = 100.0 * n_glosas / float(kpi_total)
-                elif n_total > 0:
-                    pct_glosas = 100.0 * n_glosas / float(n_total)
-            if col_vl_gl in serie_df.columns:
-                valor_glosado = float(serie_df[col_vl_gl].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
-        if not causas_df.is_empty():
-            col_causa = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
-            col_n = "Nº AIHs/APACs afetadas"
-            if col_causa in causas_df.columns and col_n in causas_df.columns:
-                linha0 = causas_df.select([col_causa, col_n]).sort(col_n, descending=True).head(1)
-                if linha0.height:
-                    top_causa_val = str(linha0[col_causa][0] or "").strip()
-                    if not top_causa_val and "Código Glosa" in causas_df.columns:
-                        top_causa_val = str(causas_df["Código Glosa"][0] or "")
-                    if len(top_causa_val) > 60:
-                        top_causa_val = top_causa_val[:57] + "…"
-                    top_causa = top_causa_val or "—"
-            # Se série_df não existir mas causas sim, calcular KPI por causas
-            if n_glosas == 0 and ("Nº AIHs/APACs afetadas" in causas_df.columns):
-                n_glosas = int(causas_df["Nº AIHs/APACs afetadas"].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
-                if kpi_total > 0:
-                    pct_glosas = 100.0 * n_glosas / float(kpi_total)
-            if valor_glosado == 0 and ("Valor total glosado (R$)" in causas_df.columns):
-                valor_glosado = float(causas_df["Valor total glosado (R$)"].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
-        self.kpi_glosas_n.set_value(n_glosas)
-        self.kpi_glosas_pct.set_value(pct_glosas)
-        self.kpi_glosas_val.set_value(valor_glosado)
-        self.kpi_glosas_top.set_value(top_causa)
-
-        # ---- Gráfico 1: Top causas de glosa (barras horizontais/verticais ordenadas) ----
-        if pg is not None:
-            self.plot_glosas_causas.clear()
-            if not causas_df.is_empty():
-                col_n = "Nº AIHs/APACs afetadas"
-                col_pct = "% sobre todas as glosas"
-                col_lbl = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
-                if col_n in causas_df.columns and col_lbl in causas_df.columns:
-                    top = causas_df.sort(col_n, descending=True).head(15)
-                    top = top.reverse()  # barras menores em baixo; top N com ordenação invertida -> primeira em cima
-                    vals = top[col_n].cast(pl.Float64, strict=False).fill_null(0).to_list()
-                    labels_full = top[col_lbl].to_list()
-                    # Se col_pct existir → cor por % (maior = mais vermelho)
-                    pcts = top[col_pct].cast(pl.Float64, strict=False).fill_null(0).to_list() if col_pct in top.columns else vals
-                    x = list(range(len(vals)))
-                    brushes_list = []
-                    max_p = max((p for p in pcts if p is not None and math.isfinite(float(p))), default=1.0) or 1.0
-                    for i, p in enumerate(pcts):
-                        t = min(1.0, (float(p) if p is not None and math.isfinite(float(p)) else 0.0) / max_p) if max_p > 0 else 0.0
-                        color = _lerp_color(_OK, _DANG, t)
-                        brushes_list.append(QBrush(color))
-                    bg = pg.BarGraphItem(x=x, height=vals, width=0.4, brushes=brushes_list)
-                    self.plot_glosas_causas.addItem(bg)
-                    # Ticks: rótulos curtos
-                    def _label_curto(s: str, lim: int = 22) -> str:
-                        ss = str(s or "").strip()
-                        return ss if len(ss) <= lim else ss[:lim-1] + "…"
-                    ticks = [(i, _label_curto(labels_full[i])) for i in range(len(labels_full))]
-                    self.plot_glosas_causas.getAxis("bottom").setTicks([ticks])
-                    self.plot_glosas_causas.getAxis("bottom").setStyle(tickTextHeight=110, autoExpandTextSpace=True)
-                    self.plot_glosas_causas.setXRange(-0.5, len(x)-0.5 if x else 0.5, padding=0)
-                    if vals:
-                        mx = max((v for v in vals if v is not None and math.isfinite(float(v))), default=1.0) or 1.0
-                        self.plot_glosas_causas.setYRange(0, float(mx) * 1.18, padding=0)
-                    titulo = f"Top {len(vals)} causas de glosa | total glosadas = {n_glosas:,}"
-                    self.plot_glosas_causas.setTitle(titulo, color=_TXT, size="10pt")
-
-            # ---- Gráfico 2: Série temporal - barras (N glosadas) + linha (% valor glosado) ----
-            self.plot_glosas_serie.clear()
+            # --- Agregados globais para KPI ---
+            n_glosas: int = 0
+            pct_glosas: float = 0.0
+            valor_glosado: float = 0.0
+            top_causa: str = "—"
             if not serie_df.is_empty():
-                col_x_candidates = [
-                    ["Competência (AAAAMM)"],
-                    ["Ano", "Mês"],
-                ]
-                x_labels: list[str] = []
-                xs: list[int] = []
+                col_n_tot = "N total AIHs/APACs"
                 col_n_gl = "N glosadas"
-                col_pct_vl = "% valor glosado $"
                 col_vl_gl = "Valor glosado (R$)"
-                heights_bar: list[float] = []
-                line_vals: list[float] = []
-                rows = serie_df.to_dicts()
-                for idx, r in enumerate(rows):
-                    xs.append(idx)
-                    # label do eixo
-                    if "Competência (AAAAMM)" in serie_df.columns:
-                        x_labels.append(str(r.get("Competência (AAAAMM)") or ""))
-                    elif "Ano" in serie_df.columns and "Mês" in serie_df.columns:
-                        a = r.get("Ano"); m = r.get("Mês")
-                        try:
-                            x_labels.append(f"{int(a)}-{int(m):02d}")
-                        except (TypeError, ValueError):
-                            x_labels.append(str(idx))
-                    else:
-                        x_labels.append(str(idx))
-                    heights_bar.append(float(r.get(col_n_gl) or 0.0) if col_n_gl in serie_df.columns else 0.0)
-                    pct_v = r.get(col_pct_vl) if col_pct_vl in serie_df.columns else None
-                    if pct_v is not None and math.isfinite(float(pct_v)):
-                        line_vals.append(float(pct_v))
-                    else:
-                        # fallback: valor_glosado apresentado normalizado em % do max valor
-                        line_vals.append(float(r.get(col_vl_gl) or 0.0) if col_vl_gl in serie_df.columns else 0.0)
-                # Barras
-                if heights_bar:
-                    bg_serie = pg.BarGraphItem(x=xs, height=heights_bar, width=0.35, brush=_brush(_DANG))
-                    self.plot_glosas_serie.addItem(bg_serie)
-                # Linha amarela (eixo 2 simplificado): normaliza para 0..max(heights_bar)*1.12
-                if line_vals and any(math.isfinite(v) and v > 0 for v in line_vals):
-                    is_pct = (col_pct_vl in serie_df.columns)
-                    if is_pct:
-                        # escala % 0..~100 → normaliza para range do gráfico de barras (se barras não zero)
-                        max_bar = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
-                        max_line = max((v for v in line_vals if math.isfinite(v)), default=1.0) or 1.0
-                        sc = (max_bar / 100.0) if max_line <= 101 else (max_bar / max_line)
-                        line_scaled = [v * sc for v in line_vals]
-                    else:
-                        line_scaled = line_vals
-                    # plota linha amarela grossa
-                    self.plot_glosas_serie.plot(xs, line_scaled, pen=_pen(_WARN, 3), name="% valor glosado $")
-                    try:
-                        self.plot_glosas_serie.showAxis("right")
-                        self.plot_glosas_serie.getAxis("right").setPen(_pen(_WARN))
-                        self.plot_glosas_serie.getAxis("right").setTextPen(_WARN)
-                        self.plot_glosas_serie.getAxis("right").setLabel(
-                            "% valor glosado ($)" if is_pct else "Valor glosado R$",
-                            color=_WARN)
-                        # escala eixo direito: mapeia 0..max_scaled → 0..max_original
-                        max_sc = max(line_scaled) if line_scaled else 1.0
-                        max_orig = max(line_vals) if line_vals else 1.0
-                        ratio = (max_orig / max_sc) if max_sc > 0 else 1.0
-                        self.plot_glosas_serie.getAxis("right").setScale(ratio)
-                    except Exception:
-                        pass
-                # Ticks
-                if x_labels and xs:
-                    passo = max(1, len(xs)//14)
-                    ticks_s = [(xs[i], x_labels[i]) for i in range(0, len(xs), passo)]
-                    self.plot_glosas_serie.getAxis("bottom").setTicks([ticks_s])
-                    self.plot_glosas_serie.getAxis("bottom").setStyle(tickTextHeight=90, autoExpandTextSpace=True)
-                    self.plot_glosas_serie.setXRange(-0.5, xs[-1]+0.5, padding=0)
-                if heights_bar:
-                    mx = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
-                    self.plot_glosas_serie.setYRange(0, float(mx) * 1.25, padding=0)
-                self.plot_glosas_serie.setTitle(
-                    f"Série histórica — {len(rows)} períodos (competência/ano-mês)",
-                    color=_TXT, size="10pt")
+                if col_n_tot in serie_df.columns and col_n_gl in serie_df.columns:
+                    n_total = int(serie_df[col_n_tot].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
+                    n_glosas = int(serie_df[col_n_gl].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
+                    if kpi_total > 0:
+                        pct_glosas = 100.0 * n_glosas / float(kpi_total)
+                    elif n_total > 0:
+                        pct_glosas = 100.0 * n_glosas / float(n_total)
+                if col_vl_gl in serie_df.columns:
+                    valor_glosado = float(serie_df[col_vl_gl].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
+            if not causas_df.is_empty():
+                col_causa = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
+                col_n = "Nº AIHs/APACs afetadas"
+                if col_causa in causas_df.columns and col_n in causas_df.columns:
+                    linha0 = causas_df.select([col_causa, col_n]).sort(col_n, descending=True).head(1)
+                    if linha0.height:
+                        top_causa_val = str(linha0[col_causa][0] or "").strip()
+                        if not top_causa_val and "Código Glosa" in causas_df.columns:
+                            top_causa_val = str(causas_df["Código Glosa"][0] or "")
+                        if len(top_causa_val) > 60:
+                            top_causa_val = top_causa_val[:57] + "…"
+                        top_causa = top_causa_val or "—"
+                # Se série_df não existir mas causas sim, calcular KPI por causas
+                if n_glosas == 0 and ("Nº AIHs/APACs afetadas" in causas_df.columns):
+                    n_glosas = int(causas_df["Nº AIHs/APACs afetadas"].cast(pl.Int64, strict=False).fill_null(0).sum() or 0)
+                    if kpi_total > 0:
+                        pct_glosas = 100.0 * n_glosas / float(kpi_total)
+                if valor_glosado == 0 and ("Valor total glosado (R$)" in causas_df.columns):
+                    valor_glosado = float(causas_df["Valor total glosado (R$)"].cast(pl.Float64, strict=False).fill_null(0).sum() or 0.0)
+            self.kpi_glosas_n.set_value(n_glosas)
+            self.kpi_glosas_pct.set_value(pct_glosas)
+            self.kpi_glosas_val.set_value(valor_glosado)
+            self.kpi_glosas_top.set_value(top_causa)
 
-        # ---- Tabelas ----
-        if not causas_df.is_empty():
-            self._plfill(self.tbl_glosas_causas, causas_df)
-        else:
-            self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Observação": [
-                "Sem causas detalhadas de glosa no dataset.",
-                "Solução: use SIA/SIH com colunas CO_GLOSA1..CO_GLOSA5 ou MOTIVO_GLOSA."
-            ]}))
-        if not serie_df.is_empty():
-            self._plfill(self.tbl_glosas_serie, serie_df)
-        else:
-            self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Observação": [
-                "Sem série temporal de glosas. Faltam colunas de competência/ano/mês ou data.",
-                "Solução: arquivos DATASUS com coluna COMPETÊNCIA ou ANO/MÊS ou DT_INTERNACAO."
-            ]}))
+            # ---- Gráfico 1: Top causas de glosa (barras horizontais/verticais ordenadas) ----
+            if pg is not None:
+                self.plot_glosas_causas.clear()
+                if not causas_df.is_empty():
+                    col_n = "Nº AIHs/APACs afetadas"
+                    col_pct = "% sobre todas as glosas"
+                    col_lbl = "Motivo / Descrição" if "Motivo / Descrição" in causas_df.columns else "Código Glosa"
+                    if col_n in causas_df.columns and col_lbl in causas_df.columns:
+                        top = causas_df.sort(col_n, descending=True).head(15)
+                        top = top.reverse()  # barras menores em baixo; top N com ordenação invertida -> primeira em cima
+                        vals = top[col_n].cast(pl.Float64, strict=False).fill_null(0).to_list()
+                        labels_full = top[col_lbl].to_list()
+                        # Se col_pct existir → cor por % (maior = mais vermelho)
+                        pcts = top[col_pct].cast(pl.Float64, strict=False).fill_null(0).to_list() if col_pct in top.columns else vals
+                        x = list(range(len(vals)))
+                        brushes_list = []
+                        max_p = max((p for p in pcts if p is not None and math.isfinite(float(p))), default=1.0) or 1.0
+                        for i, p in enumerate(pcts):
+                            t = min(1.0, (float(p) if p is not None and math.isfinite(float(p)) else 0.0) / max_p) if max_p > 0 else 0.0
+                            color = _lerp_color(_OK, _DANG, t)
+                            brushes_list.append(QBrush(color))
+                        bg = pg.BarGraphItem(x=x, height=vals, width=0.4, brushes=brushes_list)
+                        self.plot_glosas_causas.addItem(bg)
+                        # Ticks: rótulos curtos
+                        def _label_curto(s: str, lim: int = 22) -> str:
+                            ss = str(s or "").strip()
+                            return ss if len(ss) <= lim else ss[:lim-1] + "…"
+                        ticks = [(i, _label_curto(labels_full[i])) for i in range(len(labels_full))]
+                        self.plot_glosas_causas.getAxis("bottom").setTicks([ticks])
+                        self.plot_glosas_causas.getAxis("bottom").setStyle(tickTextHeight=110, autoExpandTextSpace=True)
+                        self.plot_glosas_causas.setXRange(-0.5, len(x)-0.5 if x else 0.5, padding=0)
+                        if vals:
+                            mx = max((v for v in vals if v is not None and math.isfinite(float(v))), default=1.0) or 1.0
+                            self.plot_glosas_causas.setYRange(0, float(mx) * 1.18, padding=0)
+                        titulo = f"Top {len(vals)} causas de glosa | total glosadas = {n_glosas:,}"
+                        self.plot_glosas_causas.setTitle(titulo, color=_TXT, size="10pt")
+
+                # ---- Gráfico 2: Série temporal - barras (N glosadas) + linha (% valor glosado) ----
+                self.plot_glosas_serie.clear()
+                if not serie_df.is_empty():
+                    col_x_candidates = [
+                        ["Competência (AAAAMM)"],
+                        ["Ano", "Mês"],
+                    ]
+                    x_labels: list[str] = []
+                    xs: list[int] = []
+                    col_n_gl = "N glosadas"
+                    col_pct_vl = "% valor glosado $"
+                    col_vl_gl = "Valor glosado (R$)"
+                    heights_bar: list[float] = []
+                    line_vals: list[float] = []
+                    rows = serie_df.to_dicts()
+                    for idx, r in enumerate(rows):
+                        xs.append(idx)
+                        # label do eixo
+                        if "Competência (AAAAMM)" in serie_df.columns:
+                            x_labels.append(str(r.get("Competência (AAAAMM)") or ""))
+                        elif "Ano" in serie_df.columns and "Mês" in serie_df.columns:
+                            a = r.get("Ano"); m = r.get("Mês")
+                            try:
+                                x_labels.append(f"{int(a)}-{int(m):02d}")
+                            except (TypeError, ValueError):
+                                x_labels.append(str(idx))
+                        else:
+                            x_labels.append(str(idx))
+                        heights_bar.append(float(r.get(col_n_gl) or 0.0) if col_n_gl in serie_df.columns else 0.0)
+                        pct_v = r.get(col_pct_vl) if col_pct_vl in serie_df.columns else None
+                        if pct_v is not None and math.isfinite(float(pct_v)):
+                            line_vals.append(float(pct_v))
+                        else:
+                            # fallback: valor_glosado apresentado normalizado em % do max valor
+                            line_vals.append(float(r.get(col_vl_gl) or 0.0) if col_vl_gl in serie_df.columns else 0.0)
+                    # Barras
+                    if heights_bar:
+                        bg_serie = pg.BarGraphItem(x=xs, height=heights_bar, width=0.35, brush=_brush(_DANG))
+                        self.plot_glosas_serie.addItem(bg_serie)
+                    # Linha amarela (eixo 2 simplificado): normaliza para 0..max(heights_bar)*1.12
+                    if line_vals and any(math.isfinite(v) and v > 0 for v in line_vals):
+                        is_pct = (col_pct_vl in serie_df.columns)
+                        if is_pct:
+                            # escala % 0..~100 → normaliza para range do gráfico de barras (se barras não zero)
+                            max_bar = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
+                            max_line = max((v for v in line_vals if math.isfinite(v)), default=1.0) or 1.0
+                            sc = (max_bar / 100.0) if max_line <= 101 else (max_bar / max_line)
+                            line_scaled = [v * sc for v in line_vals]
+                        else:
+                            line_scaled = line_vals
+                        # plota linha amarela grossa
+                        self.plot_glosas_serie.plot(xs, line_scaled, pen=_pen(_WARN, 3), name="% valor glosado $")
+                        try:
+                            self.plot_glosas_serie.showAxis("right")
+                            self.plot_glosas_serie.getAxis("right").setPen(_pen(_WARN))
+                            self.plot_glosas_serie.getAxis("right").setTextPen(_WARN)
+                            self.plot_glosas_serie.getAxis("right").setLabel(
+                                "% valor glosado ($)" if is_pct else "Valor glosado R$",
+                                color=_WARN)
+                            # escala eixo direito: mapeia 0..max_scaled → 0..max_original
+                            max_sc = max(line_scaled) if line_scaled else 1.0
+                            max_orig = max(line_vals) if line_vals else 1.0
+                            ratio = (max_orig / max_sc) if max_sc > 0 else 1.0
+                            self.plot_glosas_serie.getAxis("right").setScale(ratio)
+                        except Exception:
+                            pass
+                    # Ticks
+                    if x_labels and xs:
+                        passo = max(1, len(xs)//14)
+                        ticks_s = [(xs[i], x_labels[i]) for i in range(0, len(xs), passo)]
+                        self.plot_glosas_serie.getAxis("bottom").setTicks([ticks_s])
+                        self.plot_glosas_serie.getAxis("bottom").setStyle(tickTextHeight=90, autoExpandTextSpace=True)
+                        self.plot_glosas_serie.setXRange(-0.5, xs[-1]+0.5, padding=0)
+                    if heights_bar:
+                        mx = max((v for v in heights_bar if math.isfinite(v)), default=1.0) or 1.0
+                        self.plot_glosas_serie.setYRange(0, float(mx) * 1.25, padding=0)
+                    self.plot_glosas_serie.setTitle(
+                        f"Série histórica — {len(rows)} períodos (competência/ano-mês)",
+                        color=_TXT, size="10pt")
+
+            # ---- Tabelas ----
+            if not causas_df.is_empty():
+                self._plfill(self.tbl_glosas_causas, causas_df)
+            else:
+                self._plfill(self.tbl_glosas_causas, pl.DataFrame({"Observação": [
+                    "Sem causas detalhadas de glosa no dataset.",
+                    "Solução: use SIA/SIH com colunas CO_GLOSA1..CO_GLOSA5 ou MOTIVO_GLOSA."
+                ]}))
+            if not serie_df.is_empty():
+                self._plfill(self.tbl_glosas_serie, serie_df)
+            else:
+                self._plfill(self.tbl_glosas_serie, pl.DataFrame({"Observação": [
+                    "Sem série temporal de glosas. Faltam colunas de competência/ano/mês ou data.",
+                    "Solução: arquivos DATASUS com coluna COMPETÊNCIA ou ANO/MÊS ou DT_INTERNACAO."
+                ]}))
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_glosas: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     # Benchmarking Hospitalar
@@ -1623,248 +1943,234 @@ class DashboardPage(QWidget):
 
     def _fill_tab_bench(self, m: DashboardMetrics) -> None:
         """Popula o combo de hospitais e dispara a renderização inicial."""
-        df = m.benchmarking
-        self.cbo_bench_hospital.blockSignals(True)
-        self.cbo_bench_hospital.clear()
-        if df is not None and not df.is_empty():
-            # Garante colunas
-            cols = df.columns
-            col_c = "hospital_cnes"
-            col_n = "hospital_nome" if "hospital_nome" in cols else col_c
-            for r in df.select([col_c, col_n]).iter_rows(named=True):
-                cnes = str(r[col_c] or "")
-                nome = str(r.get(col_n, "") or "").strip()
-                if not cnes:
-                    continue
-                label = f"{nome}" if nome else f"CNES {cnes}"
-                if nome and cnes not in nome:
-                    label = f"{cnes} — {nome}"
-                self.cbo_bench_hospital.addItem(label, cnes)
-        self.cbo_bench_hospital.blockSignals(False)
-        if self.cbo_bench_hospital.count() > 0:
-            target_idx = 0
-            if getattr(m, "cnes_sel", None):
-                target_cnes = {str(c).strip().zfill(7) for c in m.cnes_sel if c}
-                for idx in range(self.cbo_bench_hospital.count()):
-                    c_val = str(self.cbo_bench_hospital.itemData(idx) or "").strip().zfill(7)
-                    if c_val in target_cnes:
-                        target_idx = idx
-                        break
-            self.cbo_bench_hospital.setCurrentIndex(target_idx)
-            self._on_bench_changed(target_idx)
-        else:
-            self._on_bench_changed(0)
+        try:
+            df = m.benchmarking
+            self.cbo_bench_hospital.blockSignals(True)
+            self.cbo_bench_hospital.clear()
+            if df is not None and not df.is_empty():
+                # Garante colunas
+                cols = df.columns
+                col_c = "hospital_cnes"
+                col_n = "hospital_nome" if "hospital_nome" in cols else col_c
+                for r in df.select([col_c, col_n]).iter_rows(named=True):
+                    cnes = str(r[col_c] or "")
+                    nome = str(r.get(col_n, "") or "").strip()
+                    if not cnes:
+                        continue
+                    label = f"{nome}" if nome else f"CNES {cnes}"
+                    if nome and cnes not in nome:
+                        label = f"{cnes} — {nome}"
+                    self.cbo_bench_hospital.addItem(label, cnes)
+            self.cbo_bench_hospital.blockSignals(False)
+            if self.cbo_bench_hospital.count() > 0:
+                target_idx = 0
+                if getattr(m, "cnes_sel", None):
+                    target_cnes = {str(c).strip().zfill(7) for c in m.cnes_sel if c}
+                    for idx in range(self.cbo_bench_hospital.count()):
+                        c_val = str(self.cbo_bench_hospital.itemData(idx) or "").strip().zfill(7)
+                        if c_val in target_cnes:
+                            target_idx = idx
+                            break
+                self.cbo_bench_hospital.setCurrentIndex(target_idx)
+                self._on_bench_changed(target_idx)
+            else:
+                self._on_bench_changed(0)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _fill_tab_bench: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     def _on_bench_changed(self, _idx: int = 0) -> None:
         """Atualiza os gráficos e tabela de benchmarking conforme seleção."""
-        m = self._metrics
-        if m is None or m.benchmarking.is_empty():
-            self.lbl_bench_summary.setText(
-                "Hospital: ——   Nível geográfico: ——   Comparando com —— hospitais (sem benchmarking no momento).")
-            if pg is not None:
-                self.plot_bench_bar.clear(); self.plot_bench_scatter.clear()
-            self._plfill(self.tbl_bench, pl.DataFrame({"Info": [
-                "Nenhum dado de benchmarking disponível. Rode um pipeline com dados CNES/SIA/SIH carregado."]}))
-            return
-        df = m.benchmarking
-        alvo_cnes = self.cbo_bench_hospital.currentData()
-        nivel_chave = self.cbo_bench_level.currentData() or "nivel_uf"
-        ind = self.cbo_bench_ind.currentData() or "icsap_pct"
-        nivel_label = dict(
-            (self.cbo_bench_level.itemText(i), self.cbo_bench_level.itemText(i))
-            for i in range(self.cbo_bench_level.count())
-        ).get(
-            self.cbo_bench_level.itemText(self.cbo_bench_level.currentIndex()),
-            nivel_chave,
-        )
-        # --- Acha a linha do hospital alvo
-        linha_alvo = df.filter(pl.col("hospital_cnes") == str(alvo_cnes))
-        if linha_alvo.is_empty():
-            self.lbl_bench_summary.setText(
-                f"Hospital não encontrado no conjunto; {df.height} hospitais totais.")
-            return
-        alvo_chave = str(linha_alvo[nivel_chave][0] or "")
-        if alvo_chave:
-            df_comp = df.filter(pl.col(nivel_chave) == alvo_chave)
-        else:
-            df_comp = df.clone()
-        # Remove linhas onde o indicador não existe
-        if ind in df_comp.columns:
-            df_comp = df_comp.filter(pl.col(ind).is_not_null())
-        n_comp = df_comp.height
-        if n_comp == 0:
-            self.lbl_bench_summary.setText(
-                f"Hospital: ——   Nível geográfico: {nivel_label}   Nenhum hospital com dados para o indicador selecionado.")
-            return
-        # Ordena pelo indicador (decrescente se MAIS_ALTO_PIOR para colocar os piores primeiro)
-        sort_desc = ind in self._INDICADOR_PIOR_ALTO
-        df_sorted = df_comp.sort(by=ind, descending=sort_desc)
-        # Encontra a posição do alvo no dataframe ordenado
-        alvo_i = None
-        ordered_cnes = df_sorted["hospital_cnes"].to_list()
         try:
-            alvo_i = ordered_cnes.index(str(alvo_cnes))
-        except ValueError:
+            m = self._metrics
+            if m is None or m.benchmarking.is_empty():
+                self.lbl_bench_summary.setText(
+                    "Hospital: ——   Nível geográfico: ——   Comparando com —— hospitais (sem benchmarking no momento).")
+                if pg is not None:
+                    self.plot_bench_bar.clear(); self.plot_bench_scatter.clear()
+                self._plfill(self.tbl_bench, pl.DataFrame({"Info": [
+                    "Nenhum dado de benchmarking disponível. Rode um pipeline com dados CNES/SIA/SIH carregado."]}))
+                return
+            df = m.benchmarking
+            alvo_cnes = self.cbo_bench_hospital.currentData()
+            nivel_chave = self.cbo_bench_level.currentData() or "nivel_uf"
+            ind = self.cbo_bench_ind.currentData() or "icsap_pct"
+            nivel_label = dict(
+                (self.cbo_bench_level.itemText(i), self.cbo_bench_level.itemText(i))
+                for i in range(self.cbo_bench_level.count())
+            ).get(
+                self.cbo_bench_level.itemText(self.cbo_bench_level.currentIndex()),
+                nivel_chave,
+            )
+            # --- Acha a linha do hospital alvo
+            linha_alvo = df.filter(pl.col("hospital_cnes") == str(alvo_cnes))
+            if linha_alvo.is_empty():
+                self.lbl_bench_summary.setText(
+                    f"Hospital não encontrado no conjunto; {df.height} hospitais totais.")
+                return
+            alvo_chave = str(linha_alvo[nivel_chave][0] or "")
+            if alvo_chave:
+                df_comp = df.filter(pl.col(nivel_chave) == alvo_chave)
+            else:
+                df_comp = df.clone()
+            # Remove linhas onde o indicador não existe
+            if ind in df_comp.columns:
+                df_comp = df_comp.filter(pl.col(ind).is_not_null())
+            n_comp = df_comp.height
+            if n_comp == 0:
+                self.lbl_bench_summary.setText(
+                    f"Hospital: ——   Nível geográfico: {nivel_label}   Nenhum hospital com dados para o indicador selecionado.")
+                return
+            # Ordena pelo indicador (decrescente se MAIS_ALTO_PIOR para colocar os piores primeiro)
+            sort_desc = ind in self._INDICADOR_PIOR_ALTO
+            df_sorted = df_comp.sort(by=ind, descending=sort_desc)
+            # Encontra a posição do alvo no dataframe ordenado
             alvo_i = None
-        self.lbl_bench_summary.setText(
-            f"Hospital: {self.cbo_bench_hospital.currentText()}   "
-            f"Nível geográfico: {nivel_label}   "
-            f"Comparando com {n_comp} hospitais."
-        )
-        # ---------- Gráfico de barras
-        if pg is not None:
-            self.plot_bench_bar.clear()
-            vals = df_sorted[ind].cast(pl.Float64, strict=False).fill_nan(None).to_list()
-            xs = list(range(len(vals)))
-            # Cores de barra
-            brushes_list = []
-            max_v = max((v for v in vals if v is not None), default=1.0) or 1.0
-            for i, v in enumerate(vals):
-                if i == alvo_i:
-                    brushes_list.append(QBrush(QColor(_OK)))
-                    continue
-                if v is None:
-                    brushes_list.append(QBrush(QColor("#475569")))
-                    continue
-                t = min(1.0, float(v) / max_v) if max_v > 0 else 0.0
-                if ind in self._INDICADOR_PIOR_ALTO:
-                    color = _lerp_color(_OK, _DANG, t)
-                else:  # CMI etc.: maior = complexo, então azul→roxo
-                    color = _lerp_color("#818CF8", "#A855F7", t)
-                brushes_list.append(QBrush(color))
-            bg = pg.BarGraphItem(x=xs, height=vals, width=0.35, brushes=brushes_list)
-            self.plot_bench_bar.addItem(bg)
-            mediana = 0.0
-            if vals and any(v is not None for v in vals):
-                mediana = float(df_sorted[ind].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
-                self.plot_bench_bar.addItem(
-                    pg.InfiniteLine(pos=mediana, angle=0, pen=_pen(_WARN, 2, Qt.DashLine)))
-            # Labels do eixo X: nome CNES ou últimos 7
-            def _short(t: str) -> str:
-                tt = (t or "").strip()
-                return tt if len(tt) <= 7 else tt[-7:]
-            tick_eixo = [
-                (_i, _short(str(c)))
-                for _i, c in enumerate(df_sorted["hospital_cnes"].to_list())
-                if _i % max(1, len(xs)//15) == 0
-            ]
-            self.plot_bench_bar.getAxis("bottom").setTicks([tick_eixo])
-            self.plot_bench_bar.setXRange(-0.5, len(xs)-0.5, padding=0)
-            self.plot_bench_bar.setTitle(
-                f"Benchmark {self.cbo_bench_ind.currentText()} — {n_comp} hospitais (mediana {mediana:.2f} em amarelo)",
-                color=_TXT, size="10pt")
-            # ---------- Scatter (X=%ICSAP, Y=LOS medio)
-            self.plot_bench_scatter.clear()
-            col_x = "icsap_pct"
-            col_y = "los_medio_dias"
-            if col_x in df_sorted.columns and col_y in df_sorted.columns:
-                scat = df_sorted.select([col_x, col_y, "hospital_cnes"])
-                xs_all = scat[col_x].cast(pl.Float64, strict=False).fill_nan(None).to_list()
-                ys_all = scat[col_y].cast(pl.Float64, strict=False).fill_nan(None).to_list()
-                alvo_cnes_s = str(alvo_cnes)
-                others_x, others_y, target_x, target_y = [], [], None, None
-                for _i, _c in enumerate(scat["hospital_cnes"].to_list()):
-                    xi = xs_all[_i]; yi = ys_all[_i]
-                    if xi is None or yi is None or not math.isfinite(float(xi)) or not math.isfinite(float(yi)):
-                        continue
-                    if str(_c) == alvo_cnes_s:
-                        target_x, target_y = float(xi), float(yi)
+            ordered_cnes = df_sorted["hospital_cnes"].to_list()
+            try:
+                alvo_i = ordered_cnes.index(str(alvo_cnes))
+            except ValueError:
+                alvo_i = None
+            self.lbl_bench_summary.setText(
+                f"Hospital: {self.cbo_bench_hospital.currentText()}   "
+                f"Nível geográfico: {nivel_label}   "
+                f"Comparando com {n_comp} hospitais."
+            )
+            # ---------- Gráfico de barras (horizontal, hospital alvo destacado)
+            if pg is not None:
+                vals = df_sorted[ind].cast(pl.Float64, strict=False).fill_nan(None).to_list()
+                labels_b = [self._rotulo_hosp(c) for c in df_sorted["hospital_cnes"].to_list()]
+                max_v = max((float(v) for v in vals if v is not None), default=1.0) or 1.0
+                colors_b: list[QColor] = []
+                for v in vals:
+                    if v is None:
+                        colors_b.append(QColor(charts.NEUTRAL)); continue
+                    t = min(1.0, float(v) / max_v) if max_v > 0 else 0.0
+                    if ind in self._INDICADOR_PIOR_ALTO:
+                        colors_b.append(charts.lerp(charts.OK, charts.DANG, t))
                     else:
-                        others_x.append(float(xi)); others_y.append(float(yi))
-                if others_x:
-                    sp_o = pg.ScatterPlotItem(x=others_x, y=others_y, size=8,
-                                               pen=_pen("#475569"), brush=_brush(_TXT_DIM))
-                    self.plot_bench_scatter.addItem(sp_o)
-                if target_x is not None and target_y is not None:
-                    sp_t = pg.ScatterPlotItem(x=[target_x], y=[target_y], size=18,
-                                               pen=_pen(_OK), brush=_brush(_OK))
-                    self.plot_bench_scatter.addItem(sp_t)
-                # Medianas tracejadas
-                try:
-                    med_x = float(df_sorted[col_x].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
-                    med_y = float(df_sorted[col_y].cast(pl.Float64, strict=False).drop_nans().median() or 0.0)
-                    self.plot_bench_scatter.addItem(pg.InfiniteLine(pos=med_x, angle=90, pen=_pen(_WARN, 1, Qt.DashLine)))
-                    self.plot_bench_scatter.addItem(pg.InfiniteLine(pos=med_y, angle=0, pen=_pen(_WARN, 1, Qt.DashLine)))
-                except Exception:
-                    pass
-                self.plot_bench_scatter.setLabel("bottom", "% ICSAP (evitáveis)")
-                self.plot_bench_scatter.setLabel("left", "LOS médio (dias)")
-        # ---------- Tabela
-        colunas_uteis = [
-            "hospital_cnes", "hospital_nome", "CO_UF", "CO_MUNICIPIO",
-            "n_altas", ind, "icsap_pct", "los_medio_dias", "cmi", "lace_medio",
-            "pct_alto", "readmissao_30d_pct", "custo_oe", "los_o_e",
-        ]
-        cols_existem = list(dict.fromkeys(c for c in colunas_uteis if c in df_sorted.columns))
-        self._plfill(self.tbl_bench, df_sorted.select(cols_existem) if cols_existem else df_sorted)
+                        colors_b.append(charts.lerp("#818CF8", "#A855F7", t))
+                mediana = 0.0
+                if any(v is not None for v in vals):
+                    mediana = float(df_sorted[ind].cast(pl.Float64, strict=False)
+                                    .drop_nans().drop_nulls().median() or 0.0)
+                charts.bar_categorical(
+                    self.plot_bench_bar, labels_b, [0.0 if v is None else v for v in vals],
+                    colors=colors_b,
+                    title=f"{self.cbo_bench_ind.currentText()} — {n_comp} hospitais · mediana {mediana:.2f}",
+                    value_fmt="{:.2f}", ref=mediana, ref_label="mediana",
+                    horizontal=True, highlight=alvo_i, max_items=40,
+                )
+                # ---------- Dispersão (X=%ICSAP, Y=LOS medio)
+                col_x, col_y = "icsap_pct", "los_medio_dias"
+                if col_x in df_sorted.columns and col_y in df_sorted.columns:
+                    xs_all = df_sorted[col_x].cast(pl.Float64, strict=False).fill_nan(None).to_list()
+                    ys_all = df_sorted[col_y].cast(pl.Float64, strict=False).fill_nan(None).to_list()
+                    cn = [str(c) for c in df_sorted["hospital_cnes"].to_list()]
+                    hi = cn.index(str(alvo_cnes)) if str(alvo_cnes) in cn else None
+                    charts.scatter_xy(
+                        self.plot_bench_scatter, xs_all, ys_all,
+                        title="% ICSAP × permanência média — posição do hospital selecionado",
+                        xlabel="% ICSAP (internações evitáveis)", ylabel="LOS médio (dias)",
+                        highlight=hi, highlight_label=self._rotulo_hosp(alvo_cnes),
+                    )
+                else:
+                    charts.empty_message(self.plot_bench_scatter)
+            # ---------- Tabela
+            colunas_uteis = [
+                "hospital_cnes", "hospital_nome", "CO_UF", "CO_MUNICIPIO",
+                "n_altas", ind, "icsap_pct", "los_medio_dias", "cmi", "lace_medio",
+                "pct_alto", "readmissao_30d_pct", "custo_oe", "los_o_e",
+            ]
+            cols_existem = list(dict.fromkeys(c for c in colunas_uteis if c in df_sorted.columns))
+            self._plfill(self.tbl_bench, df_sorted.select(cols_existem) if cols_existem else df_sorted)
+            QTimer.singleShot(0, self._refresh_scroll_heights)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_bench_changed: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     # Curvas de decaimento exponencial
     # ------------------------------------------------------------------
     def _on_decay_hospital_changed(self, _idx: int = 0) -> None:
-        m = self._metrics
-        if m is None or m.distance_decay.is_empty():
-            if pg is not None:
-                self.plot_distance_decay.clear()
+        try:
+            m = self._metrics
+            if m is None or m.distance_decay.is_empty():
+                if pg is not None:
+                    charts.empty_message(self.plot_distance_decay,
+                                         "Sem curvas de decaimento (requer coordenadas de hospitais e municípios)")
+                self.lbl_decay_params.setText(
+                    "Ajuste exponencial: y = A · exp(−λ · km)   λ = ——   R² = ——   DMP (km) = ——")
+                self._plfill(self.tbl_distance_decay, pl.DataFrame(
+                    {"Observação": ["Sem curvas de decaimento. Dados CNES/Municípios faltando."]}))
+                return
+            cnes = self.cbo_decay_hospital.currentData()
+            if not cnes:
+                return
+            df = m.distance_decay.filter(pl.col("hospital_cnes") == str(cnes))
+            if df.is_empty():
+                return
+            # Parâmetros do ajuste (primeira linha, repetido em todas)
+            A = float(df["A_exp"][0]) if "A_exp" in df.columns and df.height else 0.0
+            lam = float(df["lambda_exp"][0]) if "lambda_exp" in df.columns and df.height else 0.0
+            R2 = float(df["R2_exp"][0]) if "R2_exp" in df.columns and df.height else 0.0
+            dmp = float(df["dmp_km"][0]) if "dmp_km" in df.columns and df.height else 0.0
             self.lbl_decay_params.setText(
-                "Ajuste exponencial: y = A · exp(−λ · km)   λ = ——   R² = ——   DMP (km) = ——")
-            self._plfill(self.tbl_distance_decay, pl.DataFrame(
-                {"Observação": ["Sem curvas de decaimento. Dados CNES/Municípios faltando."]}))
-            return
-        cnes = self.cbo_decay_hospital.currentData()
-        if not cnes:
-            return
-        df = m.distance_decay.filter(pl.col("hospital_cnes") == str(cnes))
-        if df.is_empty():
-            return
-        # Parâmetros do ajuste (primeira linha, repetido em todas)
-        A = float(df["A_exp"][0]) if "A_exp" in df.columns and df.height else 0.0
-        lam = float(df["lambda_exp"][0]) if "lambda_exp" in df.columns and df.height else 0.0
-        R2 = float(df["R2_exp"][0]) if "R2_exp" in df.columns and df.height else 0.0
-        dmp = float(df["dmp_km"][0]) if "dmp_km" in df.columns and df.height else 0.0
-        self.lbl_decay_params.setText(
-            f"Ajuste exponencial:  y = {A:.2f} · exp(−{lam:.4f} · km)    "
-            f"λ = {lam:.4f}     R² = {R2:.3f}     DMP (km) = {dmp:.1f}")
-        # --- Gráfico
-        if pg is not None:
-            self.plot_distance_decay.clear()
-            mid_km = df["faixa_mid_km"].cast(pl.Float64).to_list()
-            taxa = df["taxa_por_1000"].cast(pl.Float64).to_list()
-            # Pontos observados (laranja)
-            xs_obs = [float(x) for x, y in zip(mid_km, taxa) if y is not None and math.isfinite(float(y))]
-            ys_obs = [float(y) for x, y in zip(mid_km, taxa) if y is not None and math.isfinite(float(y))]
-            if xs_obs:
-                sp = pg.ScatterPlotItem(x=xs_obs, y=ys_obs, size=12, symbol="o",
-                                        pen=_pen(_WARN), brush=_brush(_WARN))
-                self.plot_distance_decay.addItem(sp)
-            # Curva ajustada: 100 amostras de 0 a 80 km
-            if lam >= 0 and A > 0:
-                n_pts = 100
-                xs_curve = [80.0 * (i / (n_pts - 1)) for i in range(n_pts)]
-                ys_curve = [A * math.exp(-lam * xx) for xx in xs_curve]
-                self.plot_distance_decay.plot(
-                    xs_curve, ys_curve, pen=_pen(_PRI, 3), name="Ajuste exp."
+                f"Ajuste exponencial:  y = {A:.2f} · exp(−{lam:.4f} · km)    "
+                f"λ = {lam:.4f}     R² = {R2:.3f}     DMP (km) = {dmp:.1f}")
+            # --- Gráfico
+            if pg is not None:
+                charts.clear(self.plot_distance_decay)
+                charts.style_plot(
+                    self.plot_distance_decay,
+                    f"Curva de decaimento — {self._rotulo_hosp(cnes, 40)}",
+                    xlabel="Distância do hospital (km)", ylabel="Taxa de internação / 1.000 hab.",
+                    grid_x=True,
                 )
-            self.plot_distance_decay.setLabel("bottom", "Distância do hospital (km)")
-            self.plot_distance_decay.setLabel("left", "Taxa de internação / 1.000 hab.")
-            self.plot_distance_decay.setXRange(0, 82, padding=0)
-            max_y = max(ys_obs + [A * 1.05]) if ys_obs else 1.0
-            if max_y <= 0:
-                max_y = 1.0
-            self.plot_distance_decay.setYRange(0, float(max_y) * 1.15, padding=0)
-        # --- Tabela 5 anéis
-        cols_tab = ["faixa_km_label", "pop_anel", "n_internacoes", "taxa_por_1000"]
-        cols_show = [c for c in cols_tab if c in df.columns]
-        tab_df = df.select(cols_show) if cols_show else df
-        # Renomeia cabeçalhos
-        rename_map = {
-            "faixa_km_label": "Faixa de distância",
-            "pop_anel": "População anel",
-            "n_internacoes": "Nº internações",
-            "taxa_por_1000": "Taxa / 1.000 hab.",
-        }
-        final_cols = {}
-        for c in tab_df.columns:
-            final_cols[c] = rename_map.get(c, c)
-        tab_df = tab_df.rename(final_cols)
-        self._plfill(self.tbl_distance_decay, tab_df)
+                mid_km = df["faixa_mid_km"].cast(pl.Float64).to_list()
+                taxa = df["taxa_por_1000"].cast(pl.Float64).to_list()
+                # Pontos observados (laranja)
+                xs_obs = [float(x) for x, y in zip(mid_km, taxa) if y is not None and math.isfinite(float(y))]
+                ys_obs = [float(y) for x, y in zip(mid_km, taxa) if y is not None and math.isfinite(float(y))]
+                if xs_obs:
+                    sp = pg.ScatterPlotItem(x=xs_obs, y=ys_obs, size=12, symbol="o",
+                                            pen=_pen(_WARN), brush=_brush(_WARN))
+                    self.plot_distance_decay.addItem(sp)
+                # Curva ajustada: 100 amostras de 0 a 80 km
+                if lam >= 0 and A > 0:
+                    n_pts = 100
+                    xs_curve = [80.0 * (i / (n_pts - 1)) for i in range(n_pts)]
+                    ys_curve = [A * math.exp(-lam * xx) for xx in xs_curve]
+                    self.plot_distance_decay.plot(
+                        xs_curve, ys_curve, pen=_pen(_PRI, 3), name="Ajuste exp."
+                    )
+                self.plot_distance_decay.setLabel("bottom", "Distância do hospital (km)")
+                self.plot_distance_decay.setLabel("left", "Taxa de internação / 1.000 hab.")
+                self.plot_distance_decay.setXRange(0, 82, padding=0)
+                max_y = max(ys_obs + [A * 1.05]) if ys_obs else 1.0
+                if max_y <= 0:
+                    max_y = 1.0
+                self.plot_distance_decay.setYRange(0, float(max_y) * 1.15, padding=0)
+                for xo, yo in zip(xs_obs, ys_obs):
+                    charts._value_text(f"{yo:.1f}", (0.5, 1.4), xo, yo, self.plot_distance_decay, color=charts.DIM)
+                charts.add_legend(self.plot_distance_decay,
+                                  [("Taxa observada por anel", charts.WARN), ("Ajuste exponencial", charts.PRI)])
+            # --- Tabela 5 anéis
+            cols_tab = ["faixa_km_label", "pop_anel", "n_internacoes", "taxa_por_1000"]
+            cols_show = [c for c in cols_tab if c in df.columns]
+            tab_df = df.select(cols_show) if cols_show else df
+            # Renomeia cabeçalhos
+            rename_map = {
+                "faixa_km_label": "Faixa de distância",
+                "pop_anel": "População anel",
+                "n_internacoes": "Nº internações",
+                "taxa_por_1000": "Taxa / 1.000 hab.",
+            }
+            final_cols = {}
+            for c in tab_df.columns:
+                final_cols[c] = rename_map.get(c, c)
+            tab_df = tab_df.rename(final_cols)
+            self._plfill(self.tbl_distance_decay, tab_df)
+        except Exception as _e:
+            print(f"[!!!] EXCECAO _on_decay_hospital_changed: {type(_e).__name__}: {_e}", flush=True)
+            traceback.print_exc()

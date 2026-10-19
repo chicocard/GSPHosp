@@ -151,11 +151,15 @@ class LLMAnalyst:
 
     def install_hint(self) -> str:
         return (
-            "Para habilitar o LLM local:\n"
-            "1. pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu\n"
-            "2. Baixe um modelo GGUF (ex.: Phi-3-mini-4k-instruct-q4.gguf ~2.6GB)\n"
-            "3. Defina PAPAHHR_LLM_MODEL_PATH=/caminho/modelo.gguf no .env\n"
-            "4. (Opcional) Defina PAPAHHR_LLM_N_GPU_LAYERS > 0 se tiver GPU."
+            "Para habilitar o LLM local (opcional — o restante do GSPHosp funciona sem ele):\n"
+            "1. Instale o wheel pré-compilado (CPU) na venv do projeto:\n"
+            "   .venv\\Scripts\\python.exe -m pip install llama-cpp-python "
+            "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu\n"
+            "2. Baixe um modelo GGUF, ex.: Phi-3-mini-4k-instruct-q4.gguf (~2,3 GB):\n"
+            "   https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf\n"
+            "3. Em Configurações, informe o caminho do .gguf (ou defina "
+            "PAPAHHR_LLM_MODEL_PATH no .env).\n"
+            "4. (Opcional) PAPAHHR_LLM_N_GPU_LAYERS > 0 se tiver GPU com wheel CUDA/Vulkan."
         )
 
     def _ensure_model(self):

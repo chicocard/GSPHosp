@@ -176,7 +176,9 @@ def modelo_huff(hospitais: Sequence[HospitalNode],
     # 3. Atração agregada por hospital
     hospital_attraction = od_matrix.group_by(["CNES", "NM_HOSPITAL"]).agg(
         pl.col("forca_atracao").mean().alias("forca_media"),
-        pl.col("distancia_km").weighted_mean("probabilidade_escolha").alias("distancia_ponderada_km"),
+        # média ponderada pela probabilidade (Polars não tem Expr.weighted_mean)
+        ((pl.col("distancia_km") * pl.col("probabilidade_escolha")).sum()
+         / pl.col("probabilidade_escolha").sum().clip(lower_bound=1e-12)).alias("distancia_ponderada_km"),
         (pl.col("probabilidade_escolha") > 0.01).sum().alias("mun_atendidos"),
         pl.col("probabilidade_escolha").max().alias("probabilidade_max"),
     ).sort("forca_media", descending=True)

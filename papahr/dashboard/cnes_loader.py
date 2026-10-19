@@ -473,7 +473,57 @@ class CNESData:
             df = df.with_columns(
                 pl.col("NU_DENSIDADE").cast(pl.Float64, strict=False).fill_null(0)
             )
+        df = self._derivar_centroides_municipais(df)
         self.municipios = df
+
+    def _derivar_centroides_municipais(self, mun: pl.DataFrame) -> pl.DataFrame:
+        """Adiciona NU_LATITUDE/NU_LONGITUDE ao tbMunicipio quando ele não as traz.
+
+        O tbMunicipio do CNES não tem coordenadas, e sem elas o modelo de Huff e as
+        curvas de decaimento por distância ficavam sempre vazios. O centroide é
+        estimado pela MÉDIA das coordenadas dos estabelecimentos de saúde do próprio
+        município (tbEstabelecimento), sem nenhuma fonte externa. Municípios sem
+        estabelecimento georreferenciado ficam com null (e são ignorados pelo modelo).
+        """
+        if mun.is_empty() or "CO_MUNICIPIO" not in mun.columns:
+            return mun
+        if "NU_LATITUDE" in mun.columns and "NU_LONGITUDE" in mun.columns:
+            return mun
+        e = self.estabelecimentos
+        need = {"CO_MUNICIPIO_GESTOR", "NU_LATITUDE", "NU_LONGITUDE"}
+        if e.is_empty() or not need.issubset(set(e.columns)):
+            return mun
+        cod = pl.col("CO_MUNICIPIO_GESTOR").cast(pl.Utf8, strict=False).str.strip_chars()
+        # chave de 6 dígitos: "0120020" (zfill) → "120020"; "1200203" (7 com DV) → "120020"
+        key6 = (
+            pl.when(cod.str.starts_with("0") & (cod.str.len_chars() == 7))
+            .then(cod.str.slice(1, 6))
+            .otherwise(cod.str.slice(0, 6))
+        )
+        cent = (
+            e.select(
+                key6.alias("_key6"),
+                pl.col("NU_LATITUDE").cast(pl.Float64, strict=False).alias("_lat"),
+                pl.col("NU_LONGITUDE").cast(pl.Float64, strict=False).alias("_lon"),
+            )
+            .filter(
+                pl.col("_lat").is_not_null() & pl.col("_lon").is_not_null()
+                & (pl.col("_lat").abs() <= 90) & (pl.col("_lon").abs() <= 180)
+                & (pl.col("_lat") != 0) & (pl.col("_lon") != 0)
+            )
+            .group_by("_key6")
+            .agg(pl.col("_lat").median().alias("NU_LATITUDE"),
+                 pl.col("_lon").median().alias("NU_LONGITUDE"))
+        )
+        mcod = pl.col("CO_MUNICIPIO").cast(pl.Utf8, strict=False).str.strip_chars()
+        mun = mun.with_columns(
+            pl.when(mcod.str.starts_with("0") & (mcod.str.len_chars() == 7))
+            .then(mcod.str.slice(1, 6)).otherwise(mcod.str.slice(0, 6)).alias("_key6")
+        )
+        out = mun.join(cent, on="_key6", how="left").drop("_key6")
+        n_ok = out["NU_LATITUDE"].is_not_null().sum() if "NU_LATITUDE" in out.columns else 0
+        log.info(f"[CNES] Centroides municipais derivados dos estabelecimentos: {n_ok}/{out.height}")
+        return out
 
     # ------------------------------------------------------------------
     def buscar_estabelecimentos(self, cnes_codes: Iterable[str]) -> pl.DataFrame:

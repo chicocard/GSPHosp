@@ -169,13 +169,13 @@
 
     <div class="header">
         <h1>🛡️ Gauntlet Loop Status — GSPHosp v2.0.0</h1>
-        <span class="badge-status">✅ CATRACA ATIVA & 100% APROVADO</span>
+        <span class="badge-status">✅ CATRACA ATIVA & RE-AUDITADO (2026-10-15)</span>
     </div>
 
     <div class="grid-summary">
         <div class="kpi-card">
             <div class="kpi-title">Módulos Auditados</div>
-            <div class="kpi-value" style="color:#14B8A6;">4 / 4</div>
+            <div class="kpi-value" style="color:#14B8A6;">5 / 5</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Veredicto da Catraca</div>
@@ -184,6 +184,14 @@
         <div class="kpi-card">
             <div class="kpi-title">Testes de Regressão</div>
             <div class="kpi-value" style="color:#22C55E;">16 PASS / 0 FAIL</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Instrumentação [!!!] EXCECAO</div>
+            <div class="kpi-value" style="color:#22C55E;">16 ocorrências (mín. 10)</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Pacotes Críticos</div>
+            <div class="kpi-value" style="color:#22C55E;">DASHBOARD 6 PASS · DBC 6 PASS / 0 FAIL</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Legibilidade (AAA)</div>
@@ -231,6 +239,20 @@
                 <td>DuckDB connection locks & zoneinfo Polars vs `contract.md`</td>
                 <td><span class="verdict-approved">APROVADO</span></td>
                 <td><span class="verdict-ratchet">RETIDO NA CATRACA</span> (Cargas salvas)</td>
+            </tr>
+            <tr>
+                <td><strong>#5</strong></td>
+                <td><strong>Re-auditoria Dashboard (P0/P1)</strong>: instrumentação + risco honesto + helpers + DBC</td>
+                <td>Evidência real vs alegações do `debug-dashboard-abas-congelam-bargraph-1classe.md`</td>
+                <td><span class="verdict-approved">APROVADO</span> (16 ocorrências [!!!], 7/7 _fill_tab_*, check negativo não vacuoso, alerta LACE NÃO MENSURÁVEL)</td>
+                <td><span class="verdict-ratchet">RETIDO NA CATRACA</span> (Testar 16 PASS/0 FAIL · smoke 0 exceções · crítico 6 PASS/0 FAIL)</td>
+            </tr>
+            <tr>
+                <td><strong>#5b</strong></td>
+                <td><strong>Fix H11 — pipeline 0 linhas AC/AL 2025 (dbc_reader)</strong></td>
+                <td>Descompactador Python puro: lib externa <code>dbc-to-dbf</code> (PyPI, zlib) + fallback interno <code>_BlastState</code> (port de <code>blast.c</code>) vs <code>_critico_dbc_reader.py</code></td>
+                <td><span class="verdict-approved">APROVADO</span> (6 PASS: A–F. <strong>D</strong>: externo == interno byte a byte; <strong>C/E</strong>: RDAC2501.dbc real 323.000 B → 4541 linhas × 113 colunas)</td>
+                <td><span class="verdict-ratchet">RETIDO NA CATRACA</span> (H11 resolvido de raiz, sem DLL nativa; imune ao bloqueio WDAC do <code>datasus_dbc</code>)</td>
             </tr>
         </tbody>
     </table>
