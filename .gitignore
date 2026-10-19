@@ -79,3 +79,8 @@ Thumbs.db
 .mypy_cache/
 .ruff_cache/
 htmlcov/
+
+output/
+.venv/
+__pycache__/
+*.pyc

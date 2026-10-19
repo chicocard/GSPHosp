@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atratividade hospitalar</title>
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<style>
+  :root {
+    --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --hair: #e1e0d9; --ring: rgba(11,11,11,0.10);
+    --hosp: #eb6834; --hosp-sel: #0d366b;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  html, body { margin: 0; height: 100%; background: var(--surface); color: var(--ink); }
+  #map { position: absolute; inset: 0; background: #eceeea; }
+  .leaflet-container { font: 12px system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+  .gsp-title {
+    background: rgba(252,252,251,0.92); border: 1px solid var(--ring); border-radius: 6px;
+    padding: 6px 10px; max-width: 340px; line-height: 1.3; box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+  .gsp-title b { font-weight: 600; }
+  .gsp-title .sub { color: var(--ink-2); font-size: 11px; }
+
+  .gsp-legend {
+    background: rgba(252,252,251,0.92); border: 1px solid var(--ring); border-radius: 6px;
+    padding: 6px 10px; line-height: 1.25; font-size: 11px; color: var(--ink-2);
+    box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+  .gsp-legend .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  .gsp-legend .sw { width: 14px; height: 10px; border: 1px solid var(--ring); border-radius: 2px; flex: none; }
+  .gsp-legend .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--hosp); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--ring); flex: none; }
+  .gsp-legend .dot.sel { background: var(--hosp-sel); }
+  .gsp-legend .t { font-weight: 600; color: var(--ink); margin-bottom: 3px; }
+
+  .leaflet-tooltip.gsp-tip { font-size: 12px; line-height: 1.3; padding: 6px 8px; border-radius: 4px; }
+  .gsp-tip b { font-weight: 600; }
+  .gsp-tip .m { color: var(--ink-2); }
+  .gsp-tip table { border-collapse: collapse; margin-top: 3px; }
+  .gsp-tip td { padding: 0 6px 0 0; font-variant-numeric: tabular-nums; }
+  .gsp-tip td:last-child { text-align: right; padding: 0; }
+
+  .gsp-pop .leaflet-popup-content { margin: 10px 12px; font-size: 12px; }
+  .gsp-escolha { display: grid; gap: 6px; }
+  .gsp-escolha b { font-weight: 600; margin-bottom: 2px; }
+  .gsp-escolha button { text-align: left; background: #fff; border: 1px solid var(--ring); border-radius: 4px; padding: 6px 8px; cursor: pointer; font: inherit; color: var(--ink); }
+  .gsp-escolha button:hover { background: #eef3f2; border-color: #a9b8b5; }
+  .gsp-escolha button .m { display: block; color: var(--ink-2); font-size: 11px; }
+  #aviso { position: absolute; left: 10px; bottom: 28px; z-index: 500; max-width: 60%;
+    background: rgba(252,252,251,0.95); border: 1px solid var(--ring); border-radius: 6px; padding: 6px 10px;
+    color: var(--ink-2); font-size: 12px; display: none; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="aviso"></div>
+
+<script src="leaflet/leaflet.js"></script>
+<script src="malha_municipios.js"></script>
+<script>
+/* Ponte Qt (opcional). Em QWebEngine, qwebchannel.js vem do recurso qrc. Fora do Qt o script 404a e nada quebra. */
+(function(){ var s=document.createElement('script'); s.src='qrc:///qtwebchannel/qwebchannel.js';
+  s.onload=function(){ try{ new QWebChannel(qt.webChannelTransport, function(ch){ window.ponte = ch.objects.ponte; }); }catch(e){} };
+  document.head.appendChild(s); })();
+</script>
+
+<script>
+(function () {
+  // ---- paletas (sequencial azul 100→700; divergente azul↔vermelho com cinza no meio) ----
+  const SEQ = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
+  const DIV = ["#1c5cab", "#86b6ef", "#f0efec", "#f2a09e", "#d03b3b"];
+  const NEUTRO = { fillColor: "#f4f4f1", fillOpacity: 0.55, color: "#c3c2b7", weight: 0.4, opacity: 1 };
+  const SEM_DADO = { fillColor: "#fcfcfb", fillOpacity: 0.85, color: "#c3c2b7", weight: 0.5, opacity: 1 };
+
+  const fmt = {
+    pct: v => (v == null ? "—" : (v * 100).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + "%"),
+    num: v => (v == null ? "—" : v.toLocaleString("pt-BR", { maximumFractionDigits: 1 })),
+    km:  v => (v == null ? "—" : v.toLocaleString("pt-BR", { maximumFractionDigits: 0 }) + " km"),
+    int: v => (v == null ? "—" : Math.round(v).toLocaleString("pt-BR")),
+  };
+
+  // ---- mapa ----
+  const map = L.map("map", { preferCanvas: true, zoomControl: true, attributionControl: true })
+    .setView([-15.8, -47.9], 4);
+  L.control.scale({ imperial: false }).addTo(map);
+
+  // Fundos sem chave de API. Ordem = ordem de tentativa; se um falhar (sem internet,
+  // bloqueio, serviço fora), passa ao próximo automaticamente. O usuário também pode
+  // trocar no controle de camadas (canto superior direito).
+  const BASES = [
+    ["Cinza claro (Esri)", L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
+      maxNativeZoom: 16, maxZoom: 18, attribution: "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ" })],
+    ["OpenStreetMap", L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, opacity: 0.55, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' })],
+    ["Sem fundo", L.layerGroup()],
+  ];
+  const basesObj = Object.fromEntries(BASES);
+  L.control.layers(basesObj, null, { position: "topright", collapsed: true }).addTo(map);
+  let baseAtual = 0;
+  BASES[0][1].addTo(map);
+  const baseOk = BASES.map(() => false);
+  BASES.forEach(([nome, camada], i) => {
+    if (!camada.on) return;
+    let erros = 0;
+    camada.on("tileload", () => { baseOk[i] = true; });
+    camada.on("tileerror", () => {
+      erros++;
+      if (!baseOk[i] && erros >= 3 && map.hasLayer(camada) && i === baseAtual && i < BASES.length - 1) {
+        map.removeLayer(camada); baseAtual = i + 1; BASES[baseAtual][1].addTo(map);
+        aviso(`Fundo "${nome}" indisponível; usando "${BASES[baseAtual][0]}".`, 4000);
+      }
+    });
+  });
+  map.on("baselayerchange", e => { baseAtual = BASES.findIndex(b => b[1] === e.layer); });
+
+  // ---- malha ----
+  const malha = L.geoJSON(window.GSP_MALHA, {
+    style: () => NEUTRO,
+    onEachFeature: (f, layer) => {
+      layer.on({
+        mouseover: e => { e.target.setStyle({ weight: 1.6, color: "#0b0b0b" }); e.target.bringToFront(); marcadoresNaFrente(); },
+        mouseout:  e => { malha.resetStyle(e.target); reaplicarEstilo(e.target); },
+      });
+      layer.bindTooltip(() => tooltipMun(f.properties.cod6), { sticky: true, className: "gsp-tip", opacity: 0.97 });
+    },
+  }).addTo(map);
+  const porCod = {};
+  malha.eachLayer(l => { porCod[l.feature.properties.cod6] = l; });
+
+  // ---- estado ----
+  let estado = { payload: null, estilos: {}, hospMarkers: {}, hospLayer: L.layerGroup().addTo(map) };
+
+  function aviso(txt, ms) {
+    const el = document.getElementById("aviso"); el.textContent = txt; el.style.display = "block";
+    clearTimeout(aviso._t); aviso._t = setTimeout(() => { el.style.display = "none"; }, ms || 2500);
+  }
+
+  function corSeq(v, breaks) {
+    if (v == null || isNaN(v)) return null;
+    let i = 0; while (i < breaks.length && v > breaks[i]) i++;
+    // breaks.length classes+1; mapeia para SEQ (pula o 100 se houver poucas classes)
+    const n = breaks.length + 1;
+    const idx = Math.round(i * (SEQ.length - 1) / Math.max(1, n - 1));
+    return SEQ[idx];
+  }
+  function corDiv(v, breaks) {
+    if (v == null || isNaN(v)) return null;
+    let i = 0; while (i < breaks.length && v > breaks[i]) i++;
+    return DIV[Math.min(i, DIV.length - 1)];
+  }
+
+  function marcadoresNaFrente() {
+    // todos os marcadores ficam no mesmo canvas que a malha (um canvas separado por cima
+    // engoliria o hover dos polígonos); por isso são trazidos à frente após cada mudança
+    Object.values(estado.hospMarkers).forEach(m => m.bringToFront());
+    const sel = estado.payload && estado.payload.selecionado;
+    if (sel && estado.hospMarkers[sel]) estado.hospMarkers[sel].bringToFront();
+  }
+
+  function hospitaisPerto(latlng) {
+    // hospitais cujo marcador cobre o ponto clicado (sobreposição em cidades grandes)
+    const pt = map.latLngToLayerPoint(latlng); const out = [];
+    Object.values(estado.hospMarkers).forEach(m => {
+      const d = pt.distanceTo(map.latLngToLayerPoint(m.getLatLng()));
+      if (d <= m.options.radius + 4) out.push(m._gsp);
+    });
+    return out.sort((a, b) => (b.capt_obs || 0) - (a.capt_obs || 0));
+  }
+  function escolherHospital(lista, latlng) {
+    const html = `<div class="gsp-escolha"><b>${lista.length} hospitais neste ponto — escolha um:</b>` +
+      lista.map(h => `<button type="button" data-cnes="${h.cnes}">${h.nome}<span class="m">CNES ${h.cnes} · ${fmt.int(h.capt_obs)} internações</span></button>`).join("") + `</div>`;
+    const pop = L.popup({ maxWidth: 340, autoPan: true, className: "gsp-pop" }).setLatLng(latlng).setContent(html).openOn(map);
+    pop.getElement().querySelectorAll("button[data-cnes]").forEach(b =>
+      L.DomEvent.on(b, "click", ev => { L.DomEvent.stop(ev); map.closePopup(); window.gsp.selecionar(b.dataset.cnes); }));
+  }
+
+  function reaplicarEstilo(layer) {
+    const st = estado.estilos[layer.feature.properties.cod6];
+    if (st) layer.setStyle(st);
+  }
+
+  function tooltipMun(cod) {
+    const p = estado.payload;
+    const nome = (porCod[cod] && porCod[cod].feature.properties.nome) || cod;
+    if (!p) return `<b>${nome}</b> <span class="m">${cod}</span>`;
+    const d = p.detalhe && p.detalhe[cod];
+    const v = p.valores && p.valores[cod];
+    const dom = p.dominante && p.dominante[cod];
+    let html = `<b>${nome}</b> <span class="m">${cod}</span><br>`;
+    if (dom) html += `<span class="m">Hospital dominante:</span> ${dom.nome}<br>`;
+    if (v != null) html += `<span class="m">${p.metrica.label}:</span> <b>${fmt[p.metrica.formato](v)}</b>`;
+    if (d) {
+      html += `<table>
+        <tr><td class="m">Demanda do município na área</td><td>${fmt.int(d.demanda)}</td></tr>
+        <tr><td class="m">Internações no hospital (obs.)</td><td>${fmt.int(d.n_obs)}</td></tr>
+        <tr><td class="m">Esperadas (Huff)</td><td>${fmt.num(d.n_esp)}</td></tr>
+        <tr><td class="m">Prob. Huff</td><td>${fmt.pct(d.p)}</td></tr>
+        <tr><td class="m">Distância</td><td>${fmt.km(d.dist)}</td></tr></table>`;
+    } else if (v == null) {
+      html += `<span class="m">Sem demanda registrada nesta área</span>`;
+    }
+    return html;
+  }
+
+  function tooltipHosp(h) {
+    const p = estado.payload;
+    return `<b>${h.nome}</b> <span class="m">CNES ${h.cnes}</span><br>
+      <span class="m">${p ? p.area.nome : ""}</span>
+      <table>
+        <tr><td class="m">Internações observadas</td><td>${fmt.int(h.capt_obs)}</td></tr>
+        <tr><td class="m">Esperadas (Huff)</td><td>${fmt.num(h.capt_esp)}</td></tr>
+        <tr><td class="m">Observado / esperado</td><td>${fmt.num(h.razao)}</td></tr>
+        <tr><td class="m">Municípios p/ 80% das AIH</td><td>${fmt.int(h.n_mun_80)}</td></tr>
+        <tr><td class="m">Distância média (obs.)</td><td>${fmt.km(h.dist_obs)}</td></tr>
+        <tr><td class="m">AIH de fora do município</td><td>${fmt.pct(h.pct_fora_mun)}</td></tr>
+        <tr><td class="m">AIH de fora da região</td><td>${fmt.pct(h.pct_fora_regiao)}</td></tr>
+        <tr><td class="m">Participação na massa da área</td><td>${fmt.pct(h.share_massa)}</td></tr>
+      </table><span class="m">Clique para selecionar</span>`;
+  }
+
+  // ---- controles de legenda e título ----
+  const titulo = L.control({ position: "topleft" });
+  titulo.onAdd = () => { const d = L.DomUtil.create("div", "gsp-title"); d.innerHTML = "<b>Atratividade hospitalar</b><div class='sub'>Aguardando dados…</div>"; return d; };
+  titulo.addTo(map);
+  const legenda = L.control({ position: "bottomright" });
+  legenda.onAdd = () => L.DomUtil.create("div", "gsp-legend");
+  legenda.addTo(map);
+
+  function desenharLegenda(p) {
+    const el = legenda.getContainer(); const f = fmt[p.metrica.formato];
+    let rows = "";
+    if (p.metrica.tipo === "div") {
+      const b = p.breaks; const labels = [`< ${f(b[0])}`, `${f(b[0])} a ${f(b[1])}`, `${f(b[1])} a ${f(b[2])}`, `${f(b[2])} a ${f(b[3])}`, `> ${f(b[3])}`];
+      DIV.forEach((c, i) => { rows += `<div class="row"><span class="sw" style="background:${c}"></span>${labels[i]}</div>`; });
+    } else {
+      const b = p.breaks; const n = b.length + 1;
+      for (let i = 0; i < n; i++) {
+        const c = SEQ[Math.round(i * (SEQ.length - 1) / Math.max(1, n - 1))];
+        const lab = i === 0 ? `≤ ${f(b[0])}` : i === n - 1 ? `> ${f(b[n - 2])}` : `${f(b[i - 1])} a ${f(b[i])}`;
+        rows += `<div class="row"><span class="sw" style="background:${c}"></span>${lab}</div>`;
+      }
+    }
+    rows += `<div class="row"><span class="sw" style="background:${SEM_DADO.fillColor}"></span>sem demanda na área</div>`;
+    rows += `<div class="row" style="margin-top:4px"><span class="dot"></span>hospital (área ∝ internações)</div>`;
+    rows += `<div class="row"><span class="dot sel"></span>hospital selecionado</div>`;
+    el.innerHTML = `<div class="t">${p.metrica.label}</div>${rows}`;
+  }
+
+  function desenharTitulo(p) {
+    const el = titulo.getContainer();
+    const sel = p.selecionado ? (p.hospitais.find(h => h.cnes === p.selecionado) || {}).nome : null;
+    el.innerHTML = `<b>${p.area.nome}</b><div class="sub">${sel
+      ? `Hospital em foco: <b>${sel}</b> · <a href="#" id="gsp-limpar">limpar</a>`
+      : `Hospital dominante por município · ${p.hospitais.length} hospitais<br>Clique num hospital (mapa ou lista) para focar`}</div>`;
+    const a = el.querySelector("#gsp-limpar");
+    if (a) L.DomEvent.on(a, "click", ev => { L.DomEvent.stop(ev); window.gsp.selecionar(""); });
+  }
+
+  // ---- API pública ----
+  window.gsp = {
+    setData(p) {
+      estado.payload = p;
+      const isDiv = p.metrica.tipo === "div";
+      const corFn = isDiv ? corDiv : corSeq;
+      // estilos dos municípios
+      estado.estilos = {};
+      const ufs = new Set();
+      Object.keys(p.detalhe || {}).forEach(c => ufs.add(c.slice(0, 2)));
+      malha.eachLayer(l => {
+        const cod = l.feature.properties.cod6;
+        const v = p.valores[cod];
+        let st;
+        const exigeDemanda = p.metrica.id !== "p_huff";
+        if (v != null && (!exigeDemanda || (p.detalhe[cod] && p.detalhe[cod].demanda > 0))) {
+          st = { fillColor: corFn(v, p.breaks), fillOpacity: 0.78, color: "#ffffff", weight: 0.6, opacity: 0.9 };
+        } else if (ufs.has(cod.slice(0, 2))) {
+          st = SEM_DADO;
+        } else {
+          st = NEUTRO;
+        }
+        estado.estilos[cod] = st; l.setStyle(st);
+      });
+      // hospitais
+      estado.hospLayer.clearLayers(); estado.hospMarkers = {};
+      const maxM = Math.max(1, ...p.hospitais.map(h => h.massa || 0));
+      const pts = [];
+      p.hospitais.forEach(h => {
+        if (h.lat == null || h.lon == null) return;
+        const r = 5 + 17 * Math.sqrt((h.massa || 0) / maxM);
+        const sel = h.cnes === p.selecionado;
+        const m = L.circleMarker([h.lat, h.lon], {
+          radius: r, fillColor: sel ? "#0d366b" : "#eb6834", fillOpacity: 0.9, color: "#ffffff", weight: 2,
+        });
+        m._gsp = h;
+        m.bindTooltip(() => tooltipHosp(h), { className: "gsp-tip", direction: "top", opacity: 0.97 });
+        m.on("click", e => {
+          L.DomEvent.stop(e);
+          const perto = hospitaisPerto(e.latlng);
+          if (perto.length > 1) escolherHospital(perto, e.latlng); else window.gsp.selecionar(h.cnes);
+        });
+        m.addTo(estado.hospLayer); estado.hospMarkers[h.cnes] = m; pts.push([h.lat, h.lon]);
+      });
+      marcadoresNaFrente();
+      desenharLegenda(p); desenharTitulo(p);
+      if (p.ajustar !== false && !estado._ajustado) { window.gsp.enquadrar(); estado._ajustado = true; }
+      // centra no hospital quando a seleção muda (foco da análise)
+      if (p.selecionado && p.selecionado !== estado.ultimoSel && estado.hospMarkers[p.selecionado]) {
+        const ll = estado.hospMarkers[p.selecionado].getLatLng();
+        map.flyTo(ll, Math.max(map.getZoom(), 7), { duration: 0.6 });
+      }
+      estado.ultimoSel = p.selecionado || null;
+    },
+    selecionar(cnes) {
+      // avisa o Python; o Python recalcula o payload e chama setData de novo
+      if (window.ponte && window.ponte.hospitalClicado) window.ponte.hospitalClicado(cnes);
+      else if (estado.payload) { estado.payload.selecionado = cnes; window.gsp.setData(estado.payload); }
+    },
+    enquadrar() {
+      const p = estado.payload; if (!p) return;
+      const b = L.latLngBounds([]);
+      Object.keys(p.detalhe || {}).forEach(c => { if (porCod[c] && p.detalhe[c].demanda > 0) b.extend(porCod[c].getBounds()); });
+      p.hospitais.forEach(h => { if (h.lat != null) b.extend([h.lat, h.lon]); });
+      if (b.isValid()) map.fitBounds(b.pad(0.05));
+    },
+    enquadrarUF(uf) {
+      const b = L.latLngBounds([]);
+      malha.eachLayer(l => { if (l.feature.properties.cod6.slice(0, 2) === String(uf)) b.extend(l.getBounds()); });
+      if (b.isValid()) map.fitBounds(b.pad(0.02));
+      estado._ajustado = true;
+    },
+    destacarMunicipio(cod) {
+      const l = porCod[cod]; if (!l) return;
+      map.fitBounds(l.getBounds().pad(1.5)); l.setStyle({ weight: 2, color: "#0b0b0b" }); l.bringToFront();
+      marcadoresNaFrente();
+      setTimeout(() => reaplicarEstilo(l), 2500);
+    },
+    map, malha, porCod,
+    pronto: true,
+  };
+})();
+</script>
+</body>
+</html>
