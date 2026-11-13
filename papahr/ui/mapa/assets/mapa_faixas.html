@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GSPHosp — faixas de distância e taxas municipais</title>
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<style>
+  :root {
+    --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --hair: #e1e0d9; --ring: rgba(11,11,11,0.10); --hosp: #eb6834; --sel: #0d366b;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  html, body { margin: 0; height: 100%; background: var(--surface); color: var(--ink); }
+  #map { position: absolute; inset: 0; background: #eceeea; }
+  .leaflet-container { font: 12px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .gsp-box { background: rgba(252,252,251,0.93); border: 1px solid var(--ring); border-radius: 5px;
+    padding: 4px 7px; line-height: 1.25; box-shadow: 0 1px 2px rgba(0,0,0,.06); font-size: 11px; }
+  .gsp-title { max-width: 300px; }
+  .gsp-title b { font-weight: 600; }
+  .gsp-title .sub { color: var(--ink-2); font-size: 10px; }
+  .gsp-title .modo { margin-top: 2px; display: flex; gap: 3px; align-items: center; font-size: 10px; color: var(--ink-2); }
+  .gsp-title .modo button { font: inherit; font-size: 10px; border: 1px solid var(--hair); background: #fff; color: var(--ink);
+    border-radius: 3px; padding: 1px 6px; cursor: pointer; }
+  .gsp-title .modo button.on { background: var(--sel); color: #fff; border-color: var(--sel); }
+  .gsp-legend { font-size: 10px; color: var(--ink-2); max-width: 220px; }
+  .gsp-legend .t { font-weight: 600; color: var(--ink); margin-bottom: 2px; cursor: pointer; user-select: none; }
+  .gsp-legend .t::before { content: "▾ "; color: var(--ink-2); }
+  .gsp-legend.fechada .t::before { content: "▸ "; }
+  .gsp-legend.fechada .row { display: none; }
+  .gsp-legend .row { display: flex; align-items: center; gap: 5px; margin: 1px 0; }
+  .gsp-legend .sw { width: 14px; height: 10px; border: 1px solid var(--ring); border-radius: 2px; flex: none; }
+  .gsp-legend .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--hosp); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--ring); flex: none; }
+  .gsp-legend .ln { width: 14px; height: 0; border-top: 1.5px dashed var(--ink); flex: none; }
+  .gsp-legend .v { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--ink); }
+  .leaflet-tooltip.gsp-tip { font-size: 12px; line-height: 1.3; padding: 6px 8px; border-radius: 4px; }
+  .gsp-tip b { font-weight: 600; } .gsp-tip .m { color: var(--ink-2); }
+  .gsp-tip table { border-collapse: collapse; margin-top: 3px; }
+  .gsp-tip td { padding: 0 8px 0 0; font-variant-numeric: tabular-nums; }
+  .gsp-tip td:last-child { text-align: right; padding: 0; }
+  .gsp-km { background: rgba(252,252,251,0.9); border: 1px solid var(--ring); border-radius: 3px; padding: 0 4px;
+    font-size: 10px; color: var(--ink-2); white-space: nowrap; width: auto !important; height: auto !important; }
+  #aviso { position: absolute; left: 10px; bottom: 28px; z-index: 500; max-width: 60%; display: none;
+    background: rgba(252,252,251,0.95); border: 1px solid var(--ring); border-radius: 6px; padding: 6px 10px; color: var(--ink-2); font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="aviso"></div>
+<script src="leaflet/leaflet.js"></script>
+<script src="malha_municipios.js"></script>
+<script>
+(function(){ var s=document.createElement('script'); s.src='qrc:///qtwebchannel/qwebchannel.js';
+  s.onload=function(){ try{ new QWebChannel(qt.webChannelTransport, function(ch){ window.ponte = ch.objects.ponte; }); }catch(e){} };
+  document.head.appendChild(s); })();
+</script>
+<script>
+(function () {
+  // Paleta (validada com scripts/validate_palette.js do método dataviz):
+  // sequencial azul 100→700 para magnitude; os 7 passos também servem de rampa ordinal das faixas
+  // (os polígonos ficam delimitados pelos círculos, por isso o passo mais claro pode recuar ao fundo).
+  const SEQ7 = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
+  const SEQ5 = ["#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b"];
+  const NEUTRO = { fillColor: "#f4f4f1", fillOpacity: 0.55, color: "#c3c2b7", weight: 0.4, opacity: 1 };
+  const SEM_DADO = { fillColor: "#fcfcfb", fillOpacity: 0.85, color: "#c3c2b7", weight: 0.5, opacity: 1 };
+  const ZERO = { fillColor: "#ebebe7", fillOpacity: 0.8, color: "#ffffff", weight: 0.6, opacity: 0.9 };
+
+  const fmt = {
+    num: (v, d) => (v == null ? "—" : Number(v).toLocaleString("pt-BR", { maximumFractionDigits: d == null ? 1 : d, minimumFractionDigits: d == null ? 0 : d })),
+    int: v => (v == null ? "—" : Math.round(v).toLocaleString("pt-BR")),
+    km: v => (v == null ? "—" : Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 0 }) + " km"),
+    pct: v => (v == null ? "—" : (v * 100).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + "%"),
+  };
+
+  const map = L.map("map", { preferCanvas: true, zoomControl: true }).setView([-15.8, -47.9], 4);
+  L.control.scale({ imperial: false }).addTo(map);
+  const BASES = [
+    ["Cinza claro (Esri)", L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxNativeZoom: 16, maxZoom: 18, attribution: "Tiles &copy; Esri" })],
+    ["OpenStreetMap", L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, opacity: 0.55, attribution: '&copy; OpenStreetMap contributors' })],
+    ["Sem fundo", L.layerGroup()],
+  ];
+  L.control.layers(Object.fromEntries(BASES), null, { position: "topright", collapsed: true }).addTo(map);
+  let baseAtual = 0; BASES[0][1].addTo(map);
+  const baseOk = BASES.map(() => false);
+  BASES.forEach(([nome, camada], i) => {
+    if (!camada.on) return; let erros = 0;
+    camada.on("tileload", () => { baseOk[i] = true; });
+    camada.on("tileerror", () => { erros++;
+      if (!baseOk[i] && erros >= 3 && map.hasLayer(camada) && i === baseAtual && i < BASES.length - 1) {
+        map.removeLayer(camada); baseAtual = i + 1; BASES[baseAtual][1].addTo(map); aviso(`Fundo "${nome}" indisponível; usando "${BASES[baseAtual][0]}".`, 4000); } });
+  });
+  map.on("baselayerchange", e => { baseAtual = BASES.findIndex(b => b[1] === e.layer); });
+
+  const malha = L.geoJSON(window.GSP_MALHA, {
+    style: () => NEUTRO,
+    onEachFeature: (f, layer) => {
+      layer.on({
+        mouseover: e => { e.target.setStyle({ weight: 1.6, color: "#0b0b0b" }); e.target.bringToFront(); naFrente(); },
+        mouseout: e => { reaplicar(e.target); },
+        click: e => { L.DomEvent.stop(e); if (window.ponte && window.ponte.municipioClicado) window.ponte.municipioClicado(f.properties.cod6); },
+      });
+      layer.bindTooltip(() => tooltipMun(f.properties.cod6), { sticky: true, className: "gsp-tip", opacity: 0.97 });
+    },
+  }).addTo(map);
+  const porCod = {}; malha.eachLayer(l => { porCod[l.feature.properties.cod6] = l; });
+
+  const estado = { modo: null, p: null, estilos: {}, aneis: L.layerGroup().addTo(map), hosp: L.layerGroup().addTo(map), corMun: "taxa", destaque: null };
+
+  function aviso(txt, ms) { const el = document.getElementById("aviso"); el.textContent = txt; el.style.display = "block";
+    clearTimeout(aviso._t); aviso._t = setTimeout(() => { el.style.display = "none"; }, ms || 2500); }
+  function reaplicar(l) { const st = estado.estilos[l.feature.properties.cod6]; l.setStyle(st || NEUTRO); if (estado.destaque === l.feature.properties.cod6) l.setStyle({ weight: 2.5, color: "#0b0b0b" }); }
+  function naFrente() { estado.hosp.eachLayer(m => m.bringToFront && m.bringToFront()); }
+  function classe(v, breaks) { if (v == null || isNaN(v)) return null; let i = 0; while (i < breaks.length && v > breaks[i]) i++; return i; }
+  function corFaixa(i, n) { return SEQ7[Math.min(SEQ7.length - 1, Math.round(i * (SEQ7.length - 1) / Math.max(1, n - 1)))]; }
+  function quantis(vals, k) { const v = vals.filter(x => x != null && !isNaN(x) && x > 0).sort((a, b) => a - b); if (v.length < 2) return v;
+    const out = []; for (let i = 1; i < k; i++) { const pos = (i / k) * (v.length - 1); const lo = Math.floor(pos), hi = Math.min(lo + 1, v.length - 1); out.push(v[lo] + (v[hi] - v[lo]) * (pos - lo)); } return out; }
+  document.addEventListener("click", (ev) => {
+    const t = ev.target.closest(".gsp-legend .t");
+    if (t) t.parentElement.classList.toggle("fechada");
+  });
+  function legendaClasses(breaks, cores, f) { let rows = ""; const n = breaks.length + 1;
+    for (let i = 0; i < n; i++) { const lab = i === 0 ? `≤ ${f(breaks[0])}` : i === n - 1 ? `> ${f(breaks[n - 2])}` : `${f(breaks[i - 1])} a ${f(breaks[i])}`;
+      rows += `<div class="row"><span class="sw" style="background:${cores[i]}"></span>${lab}</div>`; } return rows; }
+
+  // ---- controles ----
+  const titulo = L.control({ position: "topleft" });
+  titulo.onAdd = () => { const d = L.DomUtil.create("div", "gsp-box gsp-title"); d.innerHTML = "<b>GSPHosp</b><div class='sub'>Aguardando dados…</div>"; L.DomEvent.disableClickPropagation(d); return d; };
+  titulo.addTo(map);
+  const legenda = L.control({ position: "bottomright" });
+  legenda.onAdd = () => { const d = L.DomUtil.create("div", "gsp-box gsp-legend"); L.DomEvent.disableClickPropagation(d); return d; };
+  legenda.addTo(map);
+
+  // ---- tooltips ----
+  function tooltipMun(cod) {
+    const nome = (porCod[cod] && porCod[cod].feature.properties.nome) || cod;
+    const p = estado.p; let html = `<b>${nome}</b> <span class="m">${cod}</span><br>`;
+    if (!p) return html;
+    if (estado.modo === "faixas") {
+      const m = p.municipios[cod];
+      if (!m) return html + `<span class="m">fora do alcance analisado / sem coordenadas</span>`;
+      const fx = p.faixas[m.faixa] || {};
+      html += `<span class="m">Faixa</span> <b>${fx.rotulo || m.faixa}</b> · <span class="m">distância</span> ${fmt.km(m.dist)}
+        <table><tr><td class="m">População</td><td>${fmt.int(m.pop)}</td></tr>
+        <tr><td class="m">Internações no hospital</td><td>${fmt.int(m.n)}</td></tr>
+        <tr><td class="m">Taxa (${p.unidade})</td><td>${m.pop > 0 ? fmt.num(m.taxa, 2) : "—"}</td></tr>
+        <tr><td class="m">Taxa da faixa</td><td>${fmt.num(fx.taxa, 2)}</td></tr></table>`;
+      return html;
+    }
+    const v = p.valores[cod]; const d = p.detalhe[cod];
+    if (v == null && !d) return html + `<span class="m">fora do recorte</span>`;
+    html += `<span class="m">${p.unidade}:</span> <b>${v == null ? "sem população" : fmt.num(v, 2)}</b>`;
+    if (d) html += `<table><tr><td class="m">Internações (todos os hospitais)</td><td>${fmt.int(d.n)}</td></tr>
+      ${d.n_hosp ? `<tr><td class="m">…no hospital em foco</td><td>${fmt.int(d.n_hosp)} (${fmt.pct(d.n_hosp / Math.max(1, d.n))})</td></tr>` : ""}
+      <tr><td class="m">População</td><td>${fmt.int(d.pop)}</td></tr>
+      <tr><td class="m">Razão com a UF</td><td>${d.razao == null ? "—" : fmt.num(d.razao, 2) + "×"}</td></tr>
+      <tr><td class="m">Percentil</td><td>${d.percentil == null ? "—" : fmt.num(d.percentil, 0)}</td></tr></table>`;
+    return html;
+  }
+
+  // ---- hospital e anéis ----
+  function desenharHospital(h, nomeExtra) {
+    estado.hosp.clearLayers(); if (!h || h.lat == null) return;
+    const m = L.circleMarker([h.lat, h.lon], { radius: 8, fillColor: "#eb6834", fillOpacity: 0.95, color: "#ffffff", weight: 2 });
+    m.bindTooltip(`<b>${h.nome || ""}</b>${h.cnes ? ` <span class="m">CNES ${h.cnes}</span>` : ""}${nomeExtra ? `<br><span class="m">${nomeExtra}</span>` : ""}`, { className: "gsp-tip", direction: "top", opacity: 0.97 });
+    m.addTo(estado.hosp);
+  }
+  function desenharAneis(h, limites) {
+    estado.aneis.clearLayers(); if (!h || h.lat == null) return;
+    limites.forEach(km => {
+      L.circle([h.lat, h.lon], { radius: km * 1000, fill: false, color: "#0b0b0b", weight: 1, opacity: 0.75, dashArray: "4 3", interactive: false }).addTo(estado.aneis);
+      const dlat = km / 111.2;   // rótulo no topo do círculo
+      L.marker([h.lat + dlat, h.lon], { icon: L.divIcon({ className: "gsp-km", html: `${km.toLocaleString("pt-BR")} km`, iconAnchor: [0, 6] }), interactive: false }).addTo(estado.aneis);
+    });
+  }
+
+  // ---- desenho: faixas ----
+  function pintarFaixas() {
+    const p = estado.p; const nF = p.faixas.length;
+    estado.estilos = {};
+    let breaks = [];
+    if (estado.corMun === "taxa") breaks = quantis(Object.values(p.municipios).map(m => m.taxa), 5);
+    Object.keys(p.municipios).forEach(cod => {
+      const m = p.municipios[cod]; let st;
+      if (estado.corMun === "faixa") st = { fillColor: corFaixa(m.faixa, nF), fillOpacity: 0.72, color: "#ffffff", weight: 0.6, opacity: 0.9 };
+      else if (m.pop > 0 && m.n > 0) st = { fillColor: SEQ5[Math.min(4, classe(m.taxa, breaks))], fillOpacity: 0.8, color: "#ffffff", weight: 0.6, opacity: 0.9 };
+      else if (m.pop > 0) st = ZERO; else st = SEM_DADO;
+      estado.estilos[cod] = st;
+    });
+    const rowRegiao = contornoRegiao(p);
+    malha.eachLayer(l => reaplicar(l));
+    naFrente();
+    // legenda
+    const el = legenda.getContainer(); let rows = "";
+    if (estado.corMun === "faixa") {
+      p.faixas.forEach((f, i) => { rows += `<div class="row"><span class="sw" style="background:${corFaixa(i, nF)}"></span>${f.rotulo}<span class="v">${f.pop > 0 ? fmt.num(f.taxa, 2) : "—"}</span></div>`; });
+      el.innerHTML = `<div class="t">Faixa · taxa (${p.unidade})</div>${rows}`;
+    } else {
+      rows = breaks.length ? legendaClasses(breaks, SEQ5, v => fmt.num(v, 1)) : `<div class="row"><span class="sw" style="background:${SEQ5[2]}"></span>com internações</div>`;
+      rows += `<div class="row"><span class="sw" style="background:${ZERO.fillColor}"></span>sem internações no hospital</div>`;
+      el.innerHTML = `<div class="t">Taxa do município (${p.unidade})</div>${rows}`;
+    }
+    el.innerHTML += `<div class="row" style="margin-top:4px"><span class="ln"></span>limites das faixas</div>${rowRegiao}<div class="row"><span class="dot"></span>hospital em foco</div>`;
+    // título + alternância
+    const t = titulo.getContainer();
+    t.innerHTML = `<b>${p.hospital.nome || "Hospital"}</b><div class="sub">${p.titulo || ""}</div>
+      <div class="modo">Colorir municípios por: <button data-m="taxa" class="${estado.corMun === "taxa" ? "on" : ""}">taxa</button><button data-m="faixa" class="${estado.corMun === "faixa" ? "on" : ""}">faixa</button></div>`;
+    t.querySelectorAll("button[data-m]").forEach(b => L.DomEvent.on(b, "click", ev => { L.DomEvent.stop(ev); estado.corMun = b.dataset.m; pintarFaixas(); }));
+  }
+
+  // ---- desenho: coropleto ----
+  function pintarCoropleto() {
+    const p = estado.p; estado.estilos = {};
+    const breaks = p.breaks && p.breaks.length ? p.breaks : quantis(Object.values(p.valores), 5);
+    const cores = SEQ5;
+    const uf = p.uf ? String(p.uf).slice(0, 2) : null;
+    malha.eachLayer(l => {
+      const cod = l.feature.properties.cod6; const v = p.valores[cod]; const d = p.detalhe[cod]; let st;
+      if (v != null && d && d.n > 0) st = { fillColor: cores[Math.min(cores.length - 1, classe(v, breaks))], fillOpacity: 0.8, color: "#ffffff", weight: 0.6, opacity: 0.9 };
+      else if (d && v != null) st = ZERO;                                   // população > 0, zero internações
+      else if (d || (uf && cod.slice(0, 2) === uf)) st = SEM_DADO;          // sem população conhecida
+      else st = NEUTRO;
+      estado.estilos[cod] = st;
+    });
+    const rowRegiao = contornoRegiao(p);
+    estado.destaque = p.destaque || null;
+    malha.eachLayer(l => reaplicar(l));
+    naFrente();
+    const el = legenda.getContainer();
+    let rows = breaks.length ? legendaClasses(breaks, cores, v => fmt.num(v, 1)) : "";
+    rows += `<div class="row"><span class="sw" style="background:${ZERO.fillColor}"></span>sem internações</div><div class="row"><span class="sw" style="background:${SEM_DADO.fillColor}"></span>sem população</div>${rowRegiao}`;
+    if (p.hospital) rows += `<div class="row"><span class="dot"></span>hospital em foco</div>`;
+    el.innerHTML = `<div class="t">${p.unidade}</div>${rows}`;
+    titulo.getContainer().innerHTML = `<b>${p.titulo || "Taxa de internação"}</b><div class="sub">quintis entre os municípios com internações · clique num município para localizá-lo na tabela</div>`;
+  }
+
+  // contorno mais forte nos municípios da região de saúde do hospital (p.regiao = {nome, cods})
+  function contornoRegiao(p) {
+    if (!p.regiao || !p.regiao.cods || !p.regiao.cods.length) return "";
+    p.regiao.cods.forEach(c => {
+      const st = estado.estilos[c] || NEUTRO;
+      estado.estilos[c] = Object.assign({}, st, { color: "#0b0b0b", weight: 1.5, opacity: 1 });
+    });
+    return `<div class="row"><span class="sw" style="background:transparent;border:1.5px solid #0b0b0b"></span>região de saúde: ${p.regiao.nome}</div>`;
+  }
+
+  function enquadrarCods(cods, extra) {
+    const b = L.latLngBounds([]);
+    cods.forEach(c => { if (porCod[c]) b.extend(porCod[c].getBounds()); });
+    (extra || []).forEach(ll => b.extend(ll));
+    if (b.isValid()) map.fitBounds(b.pad(0.05));
+  }
+
+  // Dentro do Qt a página pode carregar com o widget ainda oculto (aba inativa): o fitBounds
+  // acontece num mapa de 0×0 px e o zoom fica no mínimo. Ao ganhar tamanho real, reenquadra.
+  let tamAnterior = [window.innerWidth, window.innerHeight];
+  window.addEventListener("resize", () => {
+    const w = window.innerWidth, h = window.innerHeight;
+    if ((tamAnterior[0] < 80 || tamAnterior[1] < 80) && w >= 80 && h >= 80 && estado.p) {
+      setTimeout(() => { map.invalidateSize(); window.gsp.enquadrar(); }, 60);
+    }
+    tamAnterior = [w, h];
+  });
+
+  window.gsp = {
+    setFaixas(p) {
+      estado.modo = "faixas"; estado.p = p; estado.destaque = null; malha.eachLayer(l => l.closeTooltip());
+      if (p.modo) estado.corMun = p.modo;
+      desenharHospital(p.hospital, p.titulo); desenharAneis(p.hospital, p.limites);
+      pintarFaixas();
+      if (p.ajustar !== false) {
+        const com = Object.keys(p.municipios).filter(c => p.municipios[c].n > 0);
+        const fechados = p.limites.slice(0, -1);
+        const raio = (fechados.length ? fechados[fechados.length - 1] : p.limites[0]) * 1000;
+        const centro = L.latLng(p.hospital.lat, p.hospital.lon);
+        const circ = centro.toBounds(2 * raio);
+        const b = L.latLngBounds([]); com.forEach(c => { if (porCod[c]) b.extend(porCod[c].getBounds()); });
+        b.extend(centro);
+        // nunca maior que o último anel fechado, nunca menor que o 1º anel
+        const b1 = centro.toBounds(2 * p.limites[0] * 1000);
+        const alvo = L.latLngBounds([[Math.max(b.getSouth(), circ.getSouth()), Math.max(b.getWest(), circ.getWest())],
+                                     [Math.min(b.getNorth(), circ.getNorth()), Math.min(b.getEast(), circ.getEast())]]);
+        alvo.extend(b1);
+        map.fitBounds(alvo.pad(0.04));
+      }
+    },
+    setCoropleto(p) {
+      estado.modo = "coropleto"; estado.p = p; malha.eachLayer(l => l.closeTooltip());
+      desenharHospital(p.hospital, null); estado.aneis.clearLayers();
+      pintarCoropleto();
+      if (p.ajustar !== false) {
+        if (p.uf) window.gsp.enquadrarUF(p.uf); else enquadrarCods(Object.keys(p.valores));
+      }
+    },
+    destacar(cod, zoom) {
+      const l = porCod[cod]; if (!l) return;
+      const ant = estado.destaque; estado.destaque = cod;
+      if (ant && porCod[ant]) reaplicar(porCod[ant]);
+      reaplicar(l); l.bringToFront(); naFrente();
+      if (zoom !== false) map.flyToBounds(l.getBounds().pad(2.0), { duration: 0.5, maxZoom: 10 });
+      l.openTooltip(l.getBounds().getCenter());
+      setTimeout(() => l.closeTooltip(), 2500);
+    },
+    enquadrarUF(uf) { const b = L.latLngBounds([]); malha.eachLayer(l => { if (l.feature.properties.cod6.slice(0, 2) === String(uf).slice(0, 2)) b.extend(l.getBounds()); }); if (b.isValid()) map.fitBounds(b.pad(0.02)); },
+    enquadrar() { const p = estado.p; if (!p) return; if (estado.modo === "coropleto") { if (p.uf) window.gsp.enquadrarUF(p.uf); else enquadrarCods(Object.keys(p.valores)); } else { window.gsp.setFaixas(Object.assign({}, p, { ajustar: true })); } },
+    map, malha, porCod, pronto: true,
+  };
+})();
+</script>
+</body>
+</html>

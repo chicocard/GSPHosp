@@ -304,6 +304,13 @@ class SIGTAPRepository:
         rub = self.get_detail("Rubrica")
         if proc.is_empty():
             return ProcedureDetails(df=pl.DataFrame())
+        # CORREÇÃO: tb_procedimento não traz CO_GRUPO/CO_SUB_GRUPO/CO_FORMA_ORGANIZACAO; sem eles os joins abaixo
+        # caíam só em file_version_id (produto cartesiano) e davam a TODOS os procedimentos o mesmo
+        # grupo/subgrupo/forma. Os códigos são os dígitos 1-2, 3-4 e 5-6 de CO_PROCEDIMENTO.
+        proc = proc.with_columns(pl.col("CO_PROCEDIMENTO").cast(pl.Utf8).str.strip_chars().str.zfill(10))
+        for _co, _ini, _n in (("CO_GRUPO", 0, 2), ("CO_SUB_GRUPO", 2, 2), ("CO_FORMA_ORGANIZACAO", 4, 2)):
+            if _co not in proc.columns:
+                proc = proc.with_columns(pl.col("CO_PROCEDIMENTO").str.slice(_ini, _n).alias(_co))
 
         def _sel(df: pl.DataFrame, *cols: str) -> pl.DataFrame:
             return df.select([c for c in cols if c in df.columns])

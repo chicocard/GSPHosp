@@ -97,3 +97,10 @@ __pycache__/
 !build/GSPHosp.spec
 !build/GSPHosp.spec
 !build/GSPHosp.spec
+!papahr/data/regioes_saude.parquet
+
+*.bak-*
+*.part
+*.tmp.parquet
+gsphosp_atratividade memoria versoes/
+diag_seletor.py

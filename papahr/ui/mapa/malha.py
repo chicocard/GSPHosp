@@ -32,13 +32,24 @@ def carregar_malha() -> dict:
     return json.loads(txt)
 
 
-def _centroide_vertices(geom: dict) -> tuple[float, float]:
-    """Média dos vértices do maior anel (aproximação suficiente para distâncias)."""
+def _centroide_vertices(geom: dict | None) -> tuple[float | None, float | None]:
+    """Média dos vértices do maior anel (aproximação suficiente para distâncias).
+
+    Geometrias vazias (alguns municípios minúsculos somem na simplificação da malha)
+    devolvem (None, None) e são ignoradas por `centroides_municipios`.
+    """
+    if not geom or not geom.get("coordinates"):
+        return None, None
     if geom["type"] == "Polygon":
-        anel = geom["coordinates"][0]
+        anel = geom["coordinates"][0] if geom["coordinates"] else []
     else:  # MultiPolygon: maior polígono
-        anel = max(geom["coordinates"], key=lambda p: len(p[0]))[0]
+        poligonos = [p for p in geom["coordinates"] if p and p[0]]
+        if not poligonos:
+            return None, None
+        anel = max(poligonos, key=lambda p: len(p[0]))[0]
     n = len(anel)
+    if n == 0:
+        return None, None
     lon = sum(p[0] for p in anel) / n
     lat = sum(p[1] for p in anel) / n
     return lat, lon
@@ -52,7 +63,9 @@ def centroides_municipios(ufs: Iterable[str] | None = None) -> pl.DataFrame:
         cod = f["properties"]["cod6"]
         if ufs and cod[:2] not in ufs:
             continue
-        lat, lon = _centroide_vertices(f["geometry"])
+        lat, lon = _centroide_vertices(f.get("geometry"))
+        if lat is None:
+            continue
         rows.append((cod, f["properties"]["nome"], lat, lon))
     return pl.DataFrame(rows, schema=["COD_MUN", "NOME", "LAT", "LON"], orient="row")
 
