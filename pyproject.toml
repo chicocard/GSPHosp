@@ -80,8 +80,7 @@ include = ["papahr*"]
 exclude = ["tests*", "scripts*"]
 
 [tool.setuptools.package-data]
-papahr = ["data/*.parquet", "data/*.csv", "data/*.json", "ui/styles/*.qss"]
-
+papahr = ["data/*.parquet", "data/*.csv", "data/*.json", "ui/styles/*.qss", "ui/*.qss", "ui/atratividade/*.qss", "ui/atratividade/*.svg", "ui/mapa/assets/**/*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
